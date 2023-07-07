@@ -3,6 +3,7 @@
 module Fd = Fd
 module Resource = Resource
 module Private = Private
+module Sockopt = Sockopt
 
 include Types
 type socket = Net.stream_socket
