@@ -31,6 +31,9 @@ let listening_socket ~hook fd = object
   method! probe : type a. a Eio.Generic.ty -> a option = function
     | Eio_unix.Resource.FD -> Some fd
     | _ -> None
+
+  method getsockopt opt = Eio_unix.Net.Sockopt.get fd opt
+  method setsockopt opt v = Eio_unix.Net.Sockopt.set fd opt v
 end
 
 let datagram_socket sock = object
@@ -48,6 +51,9 @@ let datagram_socket sock = object
   method recv buf =
     let addr, recv = Err.run (Low_level.recv_msg sock) [| buf |] in
     Eio_unix.Net.sockaddr_of_unix_datagram addr, recv
+
+  method getsockopt opt = Eio_unix.Net.Sockopt.get sock opt
+  method setsockopt opt v = Eio_unix.Net.Sockopt.set sock opt v
 end
 
 (* https://www.iana.org/assignments/protocol-numbers/protocol-numbers.xhtml *)
@@ -98,9 +104,9 @@ let listen ~reuse_addr ~reuse_port ~backlog ~sw (listen_addr : Eio.Net.Sockaddr.
       Switch.null_hook
   in
   if reuse_addr then
-    Eio_unix.Sockopt.(set sock SO_REUSEADDR true);
+    Eio_unix.Net.Sockopt.(set sock SO_REUSEADDR true);
   if reuse_port then
-    Eio_unix.Sockopt.(set sock SO_REUSEPORT true);
+    Eio_unix.Net.Sockopt.(set sock SO_REUSEPORT true);
   Fd.use_exn "listen" sock (fun fd ->
       Unix.bind fd addr;
       Unix.listen fd backlog;
@@ -126,8 +132,8 @@ let create_datagram_socket ~reuse_addr ~reuse_port ~sw saddr =
   begin match saddr with
     | `Udp _ | `Unix _ as saddr ->
       let addr = Eio_unix.Net.sockaddr_to_unix saddr in
-      if reuse_addr then Eio_unix.Sockopt.(set sock SO_REUSEADDR true);
-      if reuse_port then Eio_unix.Sockopt.(set sock SO_REUSEPORT true);
+      if reuse_addr then Eio_unix.Net.Sockopt.(set sock SO_REUSEADDR true);
+      if reuse_port then Eio_unix.Net.Sockopt.(set sock SO_REUSEPORT true);
       Fd.use_exn "datagram_socket" sock (fun fd -> Unix.bind fd addr)
     | `UdpV4 | `UdpV6 -> ()
   end;

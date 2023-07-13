@@ -84,20 +84,6 @@ module Stdenv : sig
       You can use the functions in {!Eio.Stdenv} to access these fields if you prefer. *)
 end
 
-module Sockopt : sig
-  type 'a t = 'a Eio_unix__Sockopt.t =
-   | SO_KEEPALIVE : bool t
-   | SO_REUSEADDR : bool t
-   | SO_REUSEPORT : bool t
-   | TCP_CORK : int t
-   | TCP_KEEPCNT : int t
-   | TCP_KEEPIDLE : int t
-   | TCP_KEEPINTVL : int t
-
-  val set : Fd.t -> 'a t -> 'a -> unit
-  val get : Fd.t -> 'a t -> 'a
-end
-
 (** API for Eio backends only. *)
 module Private : sig
   type _ Effect.t += 
