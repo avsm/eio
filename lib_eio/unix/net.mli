@@ -87,6 +87,8 @@ module Sockopt : sig
   | TCP_KEEPCNT : int Eio.Net.Sockopt.t
   | TCP_KEEPIDLE : int Eio.Net.Sockopt.t
   | TCP_KEEPINTVL : int Eio.Net.Sockopt.t
+  | TCP_DEFER_ACCEPT : int Eio.Net.Sockopt.t
+  | TCP_NODELAY : bool Eio.Net.Sockopt.t
 
   val set : Fd.t -> 'a Eio.Net.Sockopt.t -> 'a -> unit
   (** [set fd opt v] sets the [opt] option to value [v] on socket [fd]. *)

@@ -27,6 +27,14 @@
 #define TCP_KEEPINTVL (-1)
 #endif
 
+#ifndef TCP_DEFER_ACCEPT
+#define TCP_DEFER_ACCEPT (-1)
+#endif
+
+#ifndef TCP_NODELAY
+#define TCP_NODELAY (-1)
+#endif
+
 struct socket_option {
   int level;
   int option;
@@ -40,7 +48,9 @@ static struct socket_option sockopt_int[] = {
   { IPPROTO_TCP, TCP_CORK },
   { IPPROTO_TCP, TCP_KEEPCNT },
   { IPPROTO_TCP, TCP_KEEPIDLE },
-  { IPPROTO_TCP, TCP_KEEPINTVL }
+  { IPPROTO_TCP, TCP_KEEPINTVL },
+  { IPPROTO_TCP, TCP_DEFER_ACCEPT },
+  { IPPROTO_TCP, TCP_NODELAY },
 };
 
 CAMLprim value eio_unix_getsockopt_int(value vsocket, value voption)
