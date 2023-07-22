@@ -31,6 +31,12 @@ let listening_socket ~hook fd = object
   method! probe : type a. a Eio.Generic.ty -> a option = function
     | Eio_unix.Resource.FD -> Some fd
     | _ -> None
+
+  method getsockopt : type a. a Eio.Net.Sockopt.t -> a = fun opt ->
+    Eio_unix.Net.Sockopt.get fd opt
+
+  method setsockopt : type a. a Eio.Net.Sockopt.t -> a -> unit = fun opt v ->
+    Eio_unix.Net.Sockopt.set fd opt v
 end
 
 (* todo: would be nice to avoid copying between bytes and cstructs here *)
