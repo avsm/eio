@@ -1,6 +1,9 @@
 #include <stdlib.h>
 #include <unistd.h>
+
+#ifndef _WIN32
 #include <sys/socket.h>
+#endif
 
 #ifdef __linux__
 #include <netinet/in.h>
