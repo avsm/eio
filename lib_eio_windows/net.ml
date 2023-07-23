@@ -57,6 +57,12 @@ let datagram_socket sock = object
     let recv, addr = Err.run (Low_level.recv_msg sock) b in
     Cstruct.blit_from_bytes b 0 buf 0 recv;
     Eio_unix.Net.sockaddr_of_unix_datagram addr, recv
+
+  method getsockopt : type a. a Eio.Net.Sockopt.t -> a = fun opt ->
+    Eio_unix.Net.Sockopt.get fd opt
+
+  method setsockopt : type a. a Eio.Net.Sockopt.t -> a -> unit = fun opt v ->
+    Eio_unix.Net.Sockopt.set fd opt v
 end
 
 (* https://www.iana.org/assignments/protocol-numbers/protocol-numbers.xhtml *)
