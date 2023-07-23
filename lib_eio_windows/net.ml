@@ -59,10 +59,10 @@ let datagram_socket sock = object
     Eio_unix.Net.sockaddr_of_unix_datagram addr, recv
 
   method getsockopt : type a. a Eio.Net.Sockopt.t -> a = fun opt ->
-    Eio_unix.Net.Sockopt.get fd opt
+    Eio_unix.Net.Sockopt.get sock opt
 
   method setsockopt : type a. a Eio.Net.Sockopt.t -> a -> unit = fun opt v ->
-    Eio_unix.Net.Sockopt.set fd opt v
+    Eio_unix.Net.Sockopt.set sock opt v
 end
 
 (* https://www.iana.org/assignments/protocol-numbers/protocol-numbers.xhtml *)
