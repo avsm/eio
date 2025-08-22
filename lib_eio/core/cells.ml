@@ -5,23 +5,7 @@ module type CELL = sig
   val dump : _ t Fmt.t
 end
 
-(* To avoid worrying about wrapping on 32-bit platforms,
-   we use 63-bit integers for indexes in all cases.
-   On 64-bit platforms, this is just [int]. *)
-module Int63 = struct
-  include Optint.Int63
-
-  (* Fallback for 32-bit platforms. *)
-  let rec fetch_and_add_fallback t delta =
-    let old = Atomic.get t in
-    if Atomic.compare_and_set t old (add old (of_int delta)) then old
-    else fetch_and_add_fallback t delta
-
-  let fetch_and_add : t Atomic.t -> int -> t =
-    match is_immediate with
-    | True -> Atomic.fetch_and_add
-    | False -> fetch_and_add_fallback
-end
+module Int63 = Cells_int63
 
 module Make(Cell : CELL) = struct
   let cells_per_segment = 1 lsl Cell.segment_order

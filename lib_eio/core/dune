@@ -2,3 +2,13 @@
   (name eio__core)
   (public_name eio.core)
   (libraries hmap lwt-dllist fmt optint eio.runtime_events))
+
+(rule
+ (target cells_int63.ml)
+ (enabled_if (not %{arch_sixtyfour}))
+ (action (copy cells_int63.ml.32 %{target})))
+
+(rule
+ (target cells_int63.ml)
+ (enabled_if %{arch_sixtyfour})
+ (action (copy cells_int63.ml.64 %{target})))

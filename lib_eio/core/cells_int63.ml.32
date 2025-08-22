@@ -1,0 +1,12 @@
+include Optint.Int63
+
+(* Fallback for 32-bit platforms. *)
+let rec fetch_and_add_fallback t delta =
+  let old = Atomic.get t in
+  if Atomic.compare_and_set t old (add old (of_int delta)) then old
+  else fetch_and_add_fallback t delta
+
+let fetch_and_add : t Atomic.t -> int -> t =
+  match is_immediate with
+  | True -> Atomic.fetch_and_add
+  | False -> fetch_and_add_fallback
