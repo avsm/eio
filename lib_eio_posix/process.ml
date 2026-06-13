@@ -23,11 +23,15 @@ module Impl = struct
   module T = struct
     type t = unit
 
-    let spawn_unix () ~sw ?cwd ?pgid ?uid ?gid ~env ~fds ~executable args =
-      let actions = Low_level.Process.Fork_action.[
-          inherit_fds fds;
-          execve executable ~argv:(Array.of_list args) ~env
-      ] in
+    let spawn_unix () ~sw ?cwd ?pgid ?uid ?gid ?login_tty ~env ~fds ~executable args =
+      let login_tty_action = match login_tty with
+        | None -> []
+        | Some tty -> [Eio_unix.Private.Fork_action.login_tty tty]
+      in
+      let actions = Low_level.Process.Fork_action.(
+          inherit_fds fds ::
+          login_tty_action @ [ execve executable ~argv:(Array.of_list args) ~env ]
+      ) in
       let actions = match pgid with
         | None -> actions
         | Some pgid -> Low_level.Process.Fork_action.setpgid pgid :: actions
