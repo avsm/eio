@@ -19,15 +19,18 @@ open Eio.Std
 [@@@alert "-unstable"]
 
 module Fd = Eio_unix.Fd
+module Trace = Eio.Private.Trace
 
-let socketpair k ~sw ~domain ~ty ~protocol wrap_a wrap_b =
+let socketpair sched k ~sw ~domain ~ty ~protocol wrap_a wrap_b =
   let open Effect.Deep in
   match
-    let unix_a, unix_b = Unix.socketpair ~cloexec:true domain ty protocol in
-    let a = Fd.of_unix ~sw ~blocking:false ~close_unix:true unix_a in
-    let b = Fd.of_unix ~sw ~blocking:false ~close_unix:true unix_b in
-    Unix.set_nonblock unix_a;
-    Unix.set_nonblock unix_b;
+    let unix_a, unix_b = Sched.socketpair domain ty protocol in
+    (* Wrap (attaching the switch close-hook) before associating, so a failed
+       association doesn't leak the raw sockets. *)
+    let a = Fd.of_unix ~sw ~blocking:false ~seekable:false ~close_unix:true unix_a in
+    let b = Fd.of_unix ~sw ~blocking:false ~seekable:false ~close_unix:true unix_b in
+    Fd.use_exn "socketpair-a" a (Sched.associate sched);
+    Fd.use_exn "socketpair-b" b (Sched.associate sched);
     (wrap_a a, wrap_b b)
   with
   | r -> continue k r
@@ -43,33 +46,36 @@ let run_event_loop fn x =
       match e with
       | Eio_unix.Private.Get_monotonic_clock -> Some (fun k -> continue k Time.mono_clock)
       | Eio_unix.Net.Import_socket_stream (sw, close_unix, unix_fd) -> Some (fun k ->
-          let fd = Fd.of_unix ~sw ~blocking:false ~close_unix unix_fd in
-          (* TODO: On Windows, if the FD from Unix.pipe () is passed this will fail *)
-          (try Unix.set_nonblock unix_fd with Unix.Unix_error (Unix.ENOTSOCK, _, _) -> ());
+          let fd = Fd.of_unix ~sw ~blocking:false ~seekable:false ~close_unix unix_fd in
+          Fd.use_exn "import-stream" fd (Sched.associate sched);
           continue k (Flow.of_fd fd :> _ Eio_unix.Net.stream_socket)
         )
       | Eio_unix.Net.Import_socket_listening (sw, close_unix, unix_fd) -> Some (fun k ->
-          let fd = Fd.of_unix ~sw ~blocking:false ~close_unix unix_fd in
-          Unix.set_nonblock unix_fd;
+          let fd = Fd.of_unix ~sw ~blocking:false ~seekable:false ~close_unix unix_fd in
+          Fd.use_exn "import-listening" fd (Sched.associate sched);
           continue k (Net.listening_socket ~hook:Switch.null_hook fd)
         )
       | Eio_unix.Net.Import_socket_datagram (sw, close_unix, unix_fd) -> Some (fun k ->
-          let fd = Fd.of_unix ~sw ~blocking:false ~close_unix unix_fd in
-          Unix.set_nonblock unix_fd;
+          let fd = Fd.of_unix ~sw ~blocking:false ~seekable:false ~close_unix unix_fd in
+          Fd.use_exn "import-datagram" fd (Sched.associate sched);
           continue k (Net.datagram_socket fd)
         )
       | Eio_unix.Net.Socketpair_stream (sw, domain, protocol) -> Some (fun k ->
           let wrap fd = (Flow.of_fd fd :> _ Eio_unix.Net.stream_socket) in
-          socketpair k ~sw ~domain ~protocol ~ty:Unix.SOCK_STREAM wrap wrap
+          socketpair sched k ~sw ~domain ~protocol ~ty:Unix.SOCK_STREAM wrap wrap
         )
       | Eio_unix.Net.Socketpair_datagram (sw, domain, protocol) -> Some (fun k ->
           let wrap fd = Net.datagram_socket fd in
-          socketpair k ~sw ~domain ~protocol ~ty:Unix.SOCK_DGRAM wrap wrap
+          socketpair sched k ~sw ~domain ~protocol ~ty:Unix.SOCK_DGRAM wrap wrap
         )
       | Eio_unix.Private.Pipe sw -> Some (fun k ->
           match
             let r, w = Low_level.pipe ~sw in
-            let source = Flow.of_fd r in
+            (* Associate here (not in [Low_level.pipe]): we're inside an effect
+               handler, so we use the in-scope [sched] rather than [Sched.get]. *)
+            Fd.use_exn "pipe-r" r (Sched.associate sched);
+            Fd.use_exn "pipe-w" w (Sched.associate sched);
+            let source = Flow.of_pipe_source r in
             let sink = Flow.of_fd w in
             (source, sink)
           with
@@ -96,11 +102,17 @@ let unwrap_backtrace = function
 module Impl = struct
   type t = unit
 
+  let domain_spawn ctx enqueue fn =
+    Domain.spawn @@ fun () ->
+    Trace.domain_spawn ~parent:(Eio.Private.Fiber_context.tid ctx);
+    Fun.protect fn ~finally:(fun () -> enqueue (Ok ()))
+
   let run_raw () fn =
     let domain = ref None in
-    Eio.Private.Suspend.enter "run-domain" (fun _ctx enqueue ->
-        domain := Some (Domain.spawn (fun () -> Fun.protect (wrap_backtrace fn) ~finally:(fun () -> enqueue (Ok ()))))
+    Eio.Private.Suspend.enter "run-domain" (fun ctx enqueue ->
+        domain := Some (domain_spawn ctx enqueue (wrap_backtrace fn))
       );
+    Trace.with_span "Domain.join" @@ fun () ->
     unwrap_backtrace (Domain.join (Option.get !domain))
 
   let run () fn =
@@ -108,10 +120,11 @@ module Impl = struct
     Eio.Private.Suspend.enter "run-domain" (fun ctx enqueue ->
         let cancelled, set_cancelled = Promise.create () in
         Eio.Private.Fiber_context.set_cancel_fn ctx (Promise.resolve set_cancelled);
-        domain := Some (Domain.spawn (fun () ->
-            Fun.protect (run_event_loop (wrap_backtrace (fun () -> fn ~cancelled)))
-              ~finally:(fun () -> enqueue (Ok ()))))
+        domain := Some (domain_spawn ctx enqueue (fun () ->
+            run_event_loop (wrap_backtrace (fun () -> fn ~cancelled)) ()
+          ))
       );
+    Trace.with_span "Domain.join" @@ fun () ->
     unwrap_backtrace (Domain.join (Option.get !domain))
 end
 

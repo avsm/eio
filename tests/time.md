@@ -121,6 +121,10 @@ let rec loop () =
 Exception: Eio__Time.Timeout.
 ```
 
+<!-- The sub-nanosecond case prints "1e-09", whose exponent the Windows C
+     runtime widens to "1e-009" (in both %g and Timeout.pp), so this block is
+     checked only where the exponent is two digits. -->
+<!-- $MDX os_type<>Win32 -->
 ```ocaml
 # Eio_main.run @@ fun env ->
   let clock = Eio.Stdenv.mono_clock env in

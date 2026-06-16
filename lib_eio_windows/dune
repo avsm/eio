@@ -1,14 +1,14 @@
 (library
  (name eio_windows)
  (public_name eio_windows)
- (library_flags :standard -cclib -lbcrypt -cclib -lntdll)
+ (library_flags :standard -cclib -lbcrypt -cclib -lntdll -cclib -lws2_32)
  (enabled_if (= %{os_type} "Win32"))
  (foreign_stubs
   (language c)
   (include_dirs ../lib_eio/unix/include)
   (names eio_windows_stubs))
- (c_library_flags :standard -lbcrypt -lntdll)
- (libraries eio eio.unix eio.utils fmt))
+ (c_library_flags :standard -lbcrypt -lntdll -lws2_32)
+ (libraries eio eio.unix eio.utils fmt iocp))
 
 (rule
  (targets config.ml)

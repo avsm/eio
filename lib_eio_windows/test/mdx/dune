@@ -1,0 +1,5 @@
+(mdx
+ (package eio_windows)
+ (enabled_if (= %{os_type} "Win32"))
+ (libraries unix fmt cstruct optint kcas eio.core eio eio.unix eio_windows eio.mock)
+ (deps (package eio_windows)))

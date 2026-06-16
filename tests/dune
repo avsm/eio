@@ -1,5 +1,30 @@
+; Preload the libraries the test blocks #require so that #require becomes a
+; silent no-op. Without this the toplevel loads each archive on first use and
+; ocamlfind logs "... added to search path" / "... loaded" to stdout, which mdx
+; captures and treats as unexpected output, failing the first block of every
+; file (this ocamlfind's log default is quiet on other platforms but not here).
 (mdx
   (package eio_main)
+  (files :standard \ pty.md fd_passing.md signal.md fs.md process.md)
+  (libraries eio_main eio.mock)
+  (deps
+    (env_var "EIO_BACKEND")
+    (package eio_main)))
+
+; Tests skipped on Windows:
+;   pty.md         - pseudoterminals (Eio_unix.Pty raises EOPNOTSUPP on Windows)
+;   fd_passing.md  - passing file descriptors over a Unix socket (SCM_RIGHTS)
+;   signal.md      - Unix.fork and POSIX signal delivery
+;   fs.md          - POSIX filesystem semantics: umask and permission bits,
+;                    symlink sandboxing, /dev/null and /dev/zero. The Windows
+;                    backend's filesystem is covered by lib_eio_windows/test.
+;   process.md     - POSIX signal exit statuses and a POSIX userland (sh, wc,
+;                    env, sleep). The Windows backend's process support is
+;                    covered by lib_eio_windows/test.
+(mdx
+  (package eio_main)
+  (files pty.md fd_passing.md signal.md fs.md process.md)
+  (libraries eio_main eio.mock)
   (enabled_if (<> %{os_type} "Win32"))
   (deps
     (env_var "EIO_BACKEND")

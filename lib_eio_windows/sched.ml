@@ -14,12 +14,20 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
 
+(* The Windows scheduler is a completion reactor built on an I/O completion port
+   ([Iocp.t], one per domain). Overlapped operations are started and the fiber
+   suspends on the operation's id; the scheduler blocks in [Iocp.wait] and
+   resumes the matching fiber when its completion packet arrives. This replaces
+   the old [Unix.select] readiness loop (which only worked on sockets and stalled
+   the domain on blocking handles). Operations with no overlapped form (directory
+   listing, [stat], [rename], process waits, ...) still run on the systhread pool,
+   whose results wake the loop via [Iocp.wakeup]. *)
+
 module Suspended = Eio_utils.Suspended
 module Zzz = Eio_utils.Zzz
 module Lf_queue = Eio_utils.Lf_queue
 module Fiber_context = Eio.Private.Fiber_context
 module Trace = Eio.Private.Trace
-module Rcfd = Eio_unix.Private.Rcfd
 
 type exit = [`Exit_scheduler]
 
@@ -29,41 +37,36 @@ type runnable =
   | Thread : 'a Suspended.t * 'a -> runnable            (* Resume a fiber with a result value *)
   | Failed_thread : 'a Suspended.t * exn -> runnable    (* Resume a fiber with an exception *)
 
-(* For each FD we track which fibers are waiting for it to become readable/writeable. *)
-type fd_event_waiters = {
-  read : unit Suspended.t Lwt_dllist.t;
-  write : unit Suspended.t Lwt_dllist.t;
-}
-
-module FdCompare = struct
-  type t = Unix.file_descr
-  let compare = Stdlib.compare
-end
-
-module FdSet = Set.Make (FdCompare)
-
-(* A structure for storing the file descriptors for select. *)
-type poll = {
-  mutable to_read : FdSet.t;
-  mutable to_write : FdSet.t;
-}
-
 type t = {
   (* The queue of runnable fibers ready to be resumed. Note: other domains can also add work items here. *)
   run_q : runnable Lf_queue.t;
 
-  poll : poll;
-  fd_map : (Unix.file_descr, fd_event_waiters) Hashtbl.t;
+  (* This domain's completion port. All submission, reaping and cancellation
+     happen on this domain; only [wakeup] (and the systhread pool's enqueues,
+     which call it) touch it from other threads. *)
+  iocp : Iocp.t;
 
-  (* When adding to [run_q] from another domain, this domain may be sleeping and so won't see the event.
-     In that case, [need_wakeup = true] and you must signal using [eventfd]. *)
-  eventfd : Rcfd.t;                     (* For sending events. *)
-  eventfd_r : Unix.file_descr;          (* For reading events. *)
+  (* Fibers suspended on an in-flight overlapped operation, keyed by its id. The
+     closure resumes the fiber with the completion. *)
+  io_pending : (Iocp.completion_status -> unit) Iocp.H.t;
+
+  (* Operations that couldn't be submitted because the OVERLAPPED pool was full.
+     Retried (oldest first) whenever a slot frees up; each thunk returns [true]
+     once it has taken a slot (or the pool is full again), [false] if it resolved
+     without consuming one (see {!submit_io}). *)
+  io_q : (unit -> bool) Queue.t;
+
+  (* Ids of in-flight overlapped READ operations, keyed by the raw handle they
+     were issued on. A receive-side [shutdown] cancels exactly these (see
+     {!cancel_reads}) to wake a blocked reader, without aborting a concurrent
+     send/writev on the same handle. An entry is added when a read takes an
+     OVERLAPPED slot and removed when its completion is reaped. *)
+  reads : (Unix.file_descr, Iocp.Id.t list ref) Hashtbl.t;
 
   mutable active_ops : int;             (* Exit when this is zero and [run_q] and [sleep_q] are empty. *)
 
   (* If [false], the main thread will check [run_q] before sleeping again
-     (possibly because an event has been or will be sent to [eventfd]).
+     (possibly because a wakeup has been or will be posted to the port).
      It can therefore be set to [false] in either of these cases:
      - By the receiving thread because it will check [run_q] before sleeping, or
      - By the sending thread because it will signal the main thread later *)
@@ -74,19 +77,12 @@ type t = {
   thread_pool : Eio_unix.Private.Thread_pool.t;
 }
 
-(* The message to send to [eventfd] (any character would do). *)
-let wake_buffer = Bytes.of_string "!"
-
 (* This can be called from any systhread (including ones not running Eio),
-   and also from signal handlers or GC finalizers. It must not take any locks. *)
+   and also from signal handlers or GC finalizers. It must not take any locks.
+   [PostQueuedCompletionStatus] is thread-safe. *)
 let wakeup t =
   Atomic.set t.need_wakeup false; (* [t] will check [run_q] after getting the event below *)
-  Rcfd.use t.eventfd
-    ~if_closed:ignore       (* Domain has shut down (presumably after handling the event) *)
-    (fun fd ->
-       (* This can fail if the pipe is full, but then a wake up is pending anyway. *)
-       ignore (Unix.single_write fd wake_buffer 0 1 : int);
-    )
+  Iocp.wakeup t.iocp
 
 (* Safe to call from anywhere (other systhreads, domains, signal handlers, GC finalizers) *)
 let enqueue_thread t k x =
@@ -102,75 +98,114 @@ let enqueue_failed_thread t k ex =
 let enqueue_at_head t k =
   Lf_queue.push_head t.run_q (Thread (k, ()))
 
-let get_waiters t fd =
-  match Hashtbl.find_opt t.fd_map fd with
-  | Some x -> x
+let iocp t = t.iocp
+
+(* Register [fd] with this domain's completion port so overlapped operations on
+   it deliver completions here. Idempotent: re-associating an already-registered
+   handle reports [EINVAL], which we ignore. *)
+let associate t fd =
+  try ignore (Iocp.handle_of_fd t.iocp fd 0 : Iocp.fd)
+  with Unix.Unix_error (EINVAL, _, _) -> ()
+
+(* Track in-flight overlapped reads per raw handle so a receive-side [shutdown]
+   can cancel exactly the blocked reads on that handle (see {!cancel_reads}),
+   leaving any concurrent send/writev on it untouched. *)
+let register_read t fd id =
+  match Hashtbl.find_opt t.reads fd with
+  | Some ids -> ids := id :: !ids
+  | None -> Hashtbl.add t.reads fd (ref [id])
+
+let unregister_read t fd id =
+  match Hashtbl.find_opt t.reads fd with
+  | None -> ()
+  | Some ids ->
+    ids := List.filter (fun i -> not (Iocp.Id.equal i id)) !ids;
+    if !ids = [] then Hashtbl.remove t.reads fd
+
+(* Cancel every in-flight read on [fd]. Each cancelled recv still produces an
+   [ERROR_OPERATION_ABORTED] completion, which the read path turns into
+   end-of-file; cancelling an id whose completion is already in hand is a no-op. *)
+let cancel_reads t fd =
+  match Hashtbl.find_opt t.reads fd with
+  | None -> ()
+  | Some ids -> List.iter (fun id -> Iocp.cancel t.iocp id) !ids
+
+(* A request parked because the OVERLAPPED pool was full. [dead] is set by the
+   fiber's cancel_fn so the queue drain skips this entry: a fiber cancelled while
+   parked is resumed at once rather than waiting for a slot to free, and the guard
+   stops the later drain resuming it a second time. *)
+type parked = { mutable dead : bool }
+
+(* Start an overlapped operation and resume [k] when it completes.
+   [submit ()] starts the op and returns its id, or [None] if the OVERLAPPED
+   pool is exhausted (we then park the request and retry when a slot frees).
+   [read] is the raw handle when the op is a recv, so it can be tracked for
+   {!cancel_reads}.
+   A synchronous failure (the stub raising before the op is queued) and a
+   cancellation are both reported to [k]; otherwise [on_ok] resumes it with the
+   completion.
+   Returns [true] if a free OVERLAPPED slot was taken (the op is now in flight) or
+   none was available (the pool was full and the op re-parked), and [false] if [k]
+   was resolved without consuming a slot (it was cancelled, or failed
+   synchronously). {!submit_pending} uses this to keep offering a freed slot to
+   parked ops until one actually takes it. *)
+let rec submit_io : type a. t -> a Suspended.t -> ?read:Unix.file_descr -> (unit -> Iocp.Id.t option) -> on_ok:(Iocp.completion_status -> unit) -> bool =
+  fun t k ?read submit ~on_ok ->
+  match Fiber_context.get_error k.fiber with
+  | Some ex -> enqueue_failed_thread t k ex; false
   | None ->
-    let x = { read = Lwt_dllist.create (); write = Lwt_dllist.create () } in
-    Hashtbl.add t.fd_map fd x;
-    x
+    match submit () with
+    | exception ex -> enqueue_failed_thread t k ex; false
+    | None ->
+      (* No slot free: park the request and retry when one frees. There is no id
+         to cancel yet, so register a cancel_fn that resolves [k] immediately and
+         marks the entry dead; the retry then skips a dead entry (returning [false]
+         so the drain moves on) rather than resuming [k] again. *)
+      let entry = { dead = false } in
+      Fiber_context.set_cancel_fn k.fiber (fun ex ->
+          entry.dead <- true;
+          enqueue_failed_thread t k ex);
+      Queue.push (fun () ->
+          if entry.dead then false
+          else (Fiber_context.clear_cancel_fn k.fiber;
+                submit_io t k ?read submit ~on_ok)) t.io_q;
+      true
+    | Some id ->
+      t.active_ops <- t.active_ops + 1;
+      Option.iter (fun fd -> register_read t fd id) read;
+      Iocp.H.replace t.io_pending id (fun cs ->
+          Option.iter (fun fd -> unregister_read t fd id) read;
+          Fiber_context.clear_cancel_fn k.fiber;
+          match Fiber_context.get_error k.fiber with
+          | Some e -> enqueue_failed_thread t k e   (* cancelled: report that, not the abort *)
+          | None -> on_ok cs);
+      Fiber_context.set_cancel_fn k.fiber (fun _ -> Iocp.cancel t.iocp id);
+      true
 
-(* The OS told us that the event pipe is ready. Remove events. *)
-let clear_event_fd t =
-  let buf = Bytes.create 8 in   (* Read up to 8 events at a time *)
-  let got = Unix.read t.eventfd_r buf 0 (Bytes.length buf) in
-  assert (got > 0)
+(* A completion just freed an OVERLAPPED slot: hand it to the oldest parked op.
+   If that op resolves without taking the slot (cancelled, or a synchronous
+   failure), keep offering it to the next parked op until one takes it (or the
+   pool fills again) or the queue drains — otherwise a parked op could be stranded
+   with a free slot and no further completion to trigger another drain. *)
+and submit_pending t =
+  match Queue.take_opt t.io_q with
+  | None -> ()
+  | Some fn -> if not (fn ()) then submit_pending t
 
-(* Update [t.poll]'s entry for [fd] to match [waiters]. *)
-let update t waiters fd =
-  let flags =
-    match not (Lwt_dllist.is_empty waiters.read),
-          not (Lwt_dllist.is_empty waiters.write) with
-    | false, false -> `Empty
-    | true, false -> `R
-    | false, true -> `W
-    | true, true -> `RW
-  in
-  match flags with
-  | `Empty -> (
-      t.poll.to_read <- FdSet.remove fd t.poll.to_read;
-      t.poll.to_write <- FdSet.remove fd t.poll.to_write;
-      Hashtbl.remove t.fd_map fd
-    )
-  | `R ->
-    t.poll.to_read <- FdSet.add fd t.poll.to_read;
-    t.poll.to_write <- FdSet.remove fd t.poll.to_write
-  | `W ->
-    t.poll.to_read <- FdSet.remove fd t.poll.to_read;
-    t.poll.to_write <- FdSet.add fd t.poll.to_write
-  | `RW ->
-    t.poll.to_read <- FdSet.add fd t.poll.to_read;
-    t.poll.to_write <- FdSet.add fd t.poll.to_write
-
-let resume t node =
-  t.active_ops <- t.active_ops - 1;
-  let k : unit Suspended.t = Lwt_dllist.get node in
-  Fiber_context.clear_cancel_fn k.fiber;
-  enqueue_thread t k ()
-
-(* Called when poll indicates that an event we requested for [fd] is ready. *)
-let ready t revents fd =
-  if fd == t.eventfd_r then (
-    clear_event_fd t
-    (* The scheduler will now look at the run queue again and notice any new items. *)
-  ) else (
-    let waiters = Hashtbl.find t.fd_map fd in
-    let pending = Lwt_dllist.create () in
-    if List.mem `W revents then
-      Lwt_dllist.transfer_l waiters.write pending;
-    if List.mem `R revents then
-      Lwt_dllist.transfer_l waiters.read pending;
-    (* If pending has things, it means we modified the waiters, refresh our view *)
-    if not (Lwt_dllist.is_empty pending) then
-      update t waiters fd;
-    Lwt_dllist.iter_node_r (resume t) pending
-  )
+(* Reap one completion: resume the waiting fiber and free its slot. *)
+let complete_io t (cs : Iocp.completion_status) =
+  match Iocp.H.find_opt t.io_pending cs.id with
+  | Some resume -> Iocp.H.remove t.io_pending cs.id; t.active_ops <- t.active_ops - 1; resume cs
+  | None -> ()
+  (* No waiter for this id: every in-flight op has exactly one [io_pending] entry,
+     added in [submit_io] and removed only here (a cancelled op keeps its entry
+     and is reaped through the [Some] branch, which reports the cancellation). Not
+     expected in normal operation; tolerated defensively against a stray packet. *)
 
 (* Switch control to the next ready continuation.
-   If none is ready, wait until we get an event to wake one and then switch.
+   If none is ready, wait until we get a completion (or wakeup) and then switch.
    Returns only if there is nothing to do and no active operations. *)
 let rec next t : [`Exit_scheduler] =
-  (* Wakeup any paused fibers *)
   match Lf_queue.pop t.run_q with
   | None -> assert false    (* We should always have an IO job, at least *)
   | Some Thread (k, v) ->   (* We already have a runnable task *)
@@ -193,17 +228,25 @@ let rec next t : [`Exit_scheduler] =
     | `Wait_until _ | `Nothing as next_due ->
       let timeout =
         match next_due with
+        | `Nothing -> (-1)              (* [Iocp.wait] treats -1 as INFINITE *)
         | `Wait_until time ->
           let time = Mtime.to_uint64_ns time in
           let now = Mtime.to_uint64_ns now in
           let diff_ns = Int64.sub time now in
-          (* Convert to seconds for Unix.select *)
-          let diff = Int64.(to_float diff_ns) /. 1_000_000_000. in
-          diff
-        | `Nothing -> (-1.)
+          if Int64.compare diff_ns 0L <= 0 then 0
+          else
+            (* Round up nanoseconds to whole milliseconds so we never wake early,
+               and clamp below [INFINITE]: a multi-week timeout could otherwise
+               truncate to 0xFFFFFFFF when narrowed to the DWORD [Iocp.wait] takes
+               and be misread as "wait forever". *)
+            let ms = Int64.div (Int64.add diff_ns 999_999L) 1_000_000L in
+            if Int64.compare ms 0x7fff_ffffL > 0 then 0x7fff_ffff else Int64.to_int ms
       in
-      if timeout < 0. && t.active_ops = 0 && Lf_queue.is_empty t.run_q then (
-        (* Nothing further can happen at this point. *)
+      if timeout < 0 && t.active_ops = 0 && Lf_queue.is_empty t.run_q then (
+        (* Nothing further can happen at this point. [submit_pending] offers each
+           freed slot to parked ops until [io_q] drains, so with no op in flight
+           [io_q] is necessarily empty. *)
+        assert (Queue.is_empty t.io_q);
         Lf_queue.close t.run_q;      (* Just to catch bugs if something tries to enqueue later *)
         `Exit_scheduler
       ) else (
@@ -211,94 +254,97 @@ let rec next t : [`Exit_scheduler] =
         let timeout =
           if Lf_queue.is_empty t.run_q then timeout
           else (
-            (* Either we're just checking for IO to avoid starvation, or
-               someone added a new job while we were setting [need_wakeup] to [true].
-               They might or might not have seen that, so we can't be sure they'll send an event. *)
-            0.0
+            (* Either we're just checking for IO to avoid starvation, or someone
+               added a new job while we were setting [need_wakeup] to [true].
+               They might or might not have seen that, so we can't be sure
+               they'll send an event. *)
+            0
           )
         in
         (* At this point we're not going to check [run_q] again before sleeping.
            If [need_wakeup] is still [true], this is fine because we don't promise to do that.
            If [need_wakeup = false], a wake-up event will arrive and wake us up soon. *)
         Trace.suspend_domain Begin;
-        let cons fd acc = fd :: acc in
-        let read = FdSet.fold cons t.poll.to_read [] in
-        let write = FdSet.fold cons t.poll.to_write [] in
-        match Unix.select read write [] timeout with 
-        | exception Unix.(Unix_error (EINTR, _, _)) ->
-          Trace.suspend_domain End;
-          next t
-        | readable, writeable, _ ->
-          Trace.suspend_domain End;
-          Atomic.set t.need_wakeup false;
-          Lf_queue.push t.run_q IO;                   (* Re-inject IO job in the run queue *)
-          List.iter (ready t [ `W ]) writeable; 
-          List.iter (ready t [ `R ]) readable;
-          next t
+        let packet = Iocp.wait t.iocp ~timeout in
+        Trace.suspend_domain End;
+        Atomic.set t.need_wakeup false;
+        Lf_queue.push t.run_q IO;                   (* Re-inject IO job in the run queue *)
+        (match packet with
+         | None -> ()                               (* Timed out: a timer is now due. *)
+         | Some (Iocp.Posted _) -> ()               (* A wakeup (or stray packet): re-check [run_q]. *)
+         | Some (Iocp.Io cs) ->
+           complete_io t cs;
+           (* Only reaping a completion frees an OVERLAPPED, so this is the one
+              place a parked op can now be submitted; retrying only here also
+              preserves [io_q]'s oldest-first order. *)
+           submit_pending t);
+        next t
       )
+
+(* Emulate readiness with a zero-byte overlapped recv/send: it completes once
+   [fd] is readable/writable. [associate] runs inside the submission thunk so an
+   association failure is reported to [k] like any other submission error rather
+   than escaping the scheduler; it is idempotent, so a retry re-running it is
+   harmless. (These probes only make sense on sockets.) *)
+let await_ready t (k : unit Suspended.t) fd op =
+  ignore (submit_io t k
+    (fun () -> associate t fd; op t.iocp (Iocp.Handle.of_fd fd) [Cstruct.empty])
+    ~on_ok:(fun _ -> enqueue_thread t k ()) : bool);
+  next t
+
+let await_readable t k fd = await_ready t k fd Iocp.recv
+let await_writable t k fd = await_ready t k fd Iocp.send
+
+(* Windows has no socketpair(); OCaml's AF_UNIX emulation binds the listener to
+   an address that isn't unique across processes, so concurrent processes
+   collide with EADDRINUSE/EACCES. Emulate it ourselves, binding to a
+   per-process-unique path (PID + counter), retrying only if a stale file from a
+   crashed process happens to collide. *)
+let socketpair_id = Atomic.make 0
+
+let rec unix_socketpair tries =
+  let path =
+    Filename.concat (Filename.get_temp_dir_name ())
+      (Printf.sprintf "eio-%d-%d.sock"
+         (Unix.getpid ()) (Atomic.fetch_and_add socketpair_id 1))
+  in
+  let listener = Unix.socket ~cloexec:true Unix.PF_UNIX Unix.SOCK_STREAM 0 in
+  let cleanup () =
+    Unix.close listener;
+    try Unix.unlink path with Unix.Unix_error _ -> ()
+  in
+  match
+    Unix.bind listener (Unix.ADDR_UNIX path);
+    Unix.listen listener 1;
+    let a = Unix.socket ~cloexec:true Unix.PF_UNIX Unix.SOCK_STREAM 0 in
+    (match Unix.connect a (Unix.ADDR_UNIX path) with
+     | () -> let b, _ = Unix.accept ~cloexec:true listener in (a, b)
+     | exception e -> Unix.close a; raise e)
+  with
+  | pair -> cleanup (); pair
+  | exception Unix.Unix_error ((EADDRINUSE | EACCES), _, _) when tries > 0 ->
+    cleanup (); unix_socketpair (tries - 1)
+  | exception e -> cleanup (); raise e
+
+(* AF_UNIX stream pairs use our unique-address emulation; anything else (rare on
+   Windows) falls back to the stdlib. *)
+let socketpair domain ty protocol =
+  match domain, ty with
+  | Unix.PF_UNIX, Unix.SOCK_STREAM -> unix_socketpair 100
+  | _ -> Unix.socketpair ~cloexec:true domain ty protocol
 
 let with_sched fn =
   let run_q = Lf_queue.create () in
   Lf_queue.push run_q IO;
   let sleep_q = Zzz.create () in
-  (* Pipes on Windows cannot be nonblocking through the OCaml API. *)
-  let eventfd_r, eventfd_w = Unix.socketpair ~cloexec:true Unix.PF_UNIX Unix.SOCK_STREAM 0 in
-  Unix.set_nonblock eventfd_r;
-  Unix.set_nonblock eventfd_w;
-  let eventfd = Rcfd.make eventfd_w in
-  let cleanup () =
-    Unix.close eventfd_r;
-    let was_open = Rcfd.close eventfd in
-    assert was_open
-  in
-  let poll = { to_read = FdSet.empty; to_write = FdSet.empty } in
-  let fd_map = Hashtbl.create 10 in
+  let iocp = Iocp.create 1 in
+  let io_pending = Iocp.H.create 64 in
+  let io_q = Queue.create () in
+  let reads = Hashtbl.create 16 in
   let thread_pool = Eio_unix.Private.Thread_pool.create ~sleep_q in
-  let t = { run_q; poll; fd_map; eventfd; eventfd_r;
+  let t = { run_q; iocp; io_pending; io_q; reads;
             active_ops = 0; need_wakeup = Atomic.make false; sleep_q; thread_pool } in
-  t.poll.to_read <- FdSet.add eventfd_r t.poll.to_read;
-  match fn t with
-  | x -> cleanup (); x
-  | exception ex ->
-    let bt = Printexc.get_raw_backtrace () in
-    cleanup ();
-    Printexc.raise_with_backtrace ex bt
-
-let await_readable t (k : unit Suspended.t) fd =
-  match Fiber_context.get_error k.fiber with
-  | Some e -> Suspended.discontinue k e
-  | None ->
-    t.active_ops <- t.active_ops + 1;
-    let waiters = get_waiters t fd in
-    let was_empty = Lwt_dllist.is_empty waiters.read in
-    let node = Lwt_dllist.add_l k waiters.read in
-    if was_empty then update t waiters fd;
-    Fiber_context.set_cancel_fn k.fiber (fun ex ->
-        Lwt_dllist.remove node;
-        if Lwt_dllist.is_empty waiters.read then
-          update t waiters fd;
-        t.active_ops <- t.active_ops - 1;
-        enqueue_failed_thread t k ex
-      );
-    next t
-
-let await_writable t (k : unit Suspended.t) fd =
-  match Fiber_context.get_error k.fiber with
-  | Some e -> Suspended.discontinue k e
-  | None ->
-    t.active_ops <- t.active_ops + 1;
-    let waiters = get_waiters t fd in
-    let was_empty = Lwt_dllist.is_empty waiters.write in
-    let node = Lwt_dllist.add_l k waiters.write in
-    if was_empty then update t waiters fd;
-    Fiber_context.set_cancel_fn k.fiber (fun ex ->
-        Lwt_dllist.remove node;
-        if Lwt_dllist.is_empty waiters.write then
-          update t waiters fd;
-        t.active_ops <- t.active_ops - 1;
-        enqueue_failed_thread t k ex
-      );
-    next t
+  fn t
 
 let get_enqueue t k = function
   | Ok v -> enqueue_thread t k v
@@ -328,7 +374,17 @@ let with_op t fn x =
 [@@@alert "-unstable"]
 
 type _ Effect.t += Enter : (t -> 'a Eio_utils.Suspended.t -> [`Exit_scheduler]) -> 'a Effect.t
-let enter fn = Effect.perform (Enter fn)
+let enter op fn = Trace.suspend_fiber op; Effect.perform (Enter fn)
+
+type _ Effect.t += Get : t Effect.t
+let get () = Effect.perform Get
+
+(* Submit an overlapped operation built by [submit iocp] and suspend until it
+   completes, returning the completion status. [op] labels it for tracing. *)
+let enter_io ?read op submit =
+  enter op (fun t k ->
+      ignore (submit_io t k ?read (fun () -> submit t.iocp) ~on_ok:(fun cs -> enqueue_thread t k cs) : bool);
+      next t)
 
 let run ~extra_effects t main x =
   let rec fork ~new_fiber:fiber fn =
@@ -340,8 +396,9 @@ let run ~extra_effects t main x =
             Fiber_context.destroy fiber;
             Printexc.raise_with_backtrace ex (Printexc.get_raw_backtrace ())
           );
-        effc = fun (type a) (e : a Effect.t) ->
+        effc = fun (type a) (e : a Effect.t) : ((a, [`Exit_scheduler]) Effect.Deep.continuation -> [`Exit_scheduler]) option ->
           match e with
+          | Get -> Some (fun k -> Effect.Deep.continue k t)
           | Enter fn -> Some (fun k ->
               match Fiber_context.get_error fiber with
               | Some e -> discontinue k e

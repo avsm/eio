@@ -1,21 +1,19 @@
-(** This module provides an effects-based API for calling POSIX functions.
+(** This module provides an effects-based API for the Windows backend's I/O.
 
     Normally it's better to use the cross-platform {!Eio} APIs instead,
-    which uses these functions automatically where appropriate.
+    which use these functions automatically where appropriate.
 
-    These functions mostly copy the POSIX APIs directly, except that:
+    Byte I/O is dispatched per descriptor: sockets and socketpair-backed pipes use
+    overlapped IOCP operations driven by {!Sched}, while regular files and the
+    blocking standard handles run on the systhread pool. These functions:
 
-    + They suspend the calling fiber instead of returning [EAGAIN] or similar.
-    + They handle [EINTR] by automatically restarting the call.
-    + They wrap {!Unix.file_descr} in {!Fd}, to avoid use-after-close bugs.
-    + They attach new FDs to switches, to avoid resource leaks. *)
+    + suspend the calling fiber rather than blocking the scheduler domain;
+    + wrap {!Unix.file_descr} in {!Fd}, to avoid use-after-close bugs;
+    + attach new FDs to switches, to avoid resource leaks. *)
 
 open Eio.Std
 
 type fd := Eio_unix.Fd.t
-
-val await_readable : fd -> unit
-val await_writable : fd -> unit
 
 val sleep_until : Mtime.t -> unit
 
@@ -30,8 +28,8 @@ val accept : sw:Switch.t -> fd -> fd * Unix.sockaddr
 
 val shutdown : fd -> Unix.shutdown_command -> unit
 
-val recv_msg : fd -> bytes -> int * Unix.sockaddr
-val send_msg : fd -> ?dst:Unix.sockaddr -> bytes -> int
+val recv_msg : fd -> Cstruct.t list -> int * Unix.sockaddr
+val send_msg : fd -> ?dst:Unix.sockaddr -> Cstruct.t list -> int
 
 val getrandom : Cstruct.t -> unit
 
@@ -39,7 +37,15 @@ val lseek : fd -> Optint.Int63.t -> [`Set | `Cur | `End] -> Optint.Int63.t
 val fsync : fd -> unit
 val ftruncate : fd -> Optint.Int63.t -> unit
 
-val fstat : fd -> Unix.LargeFile.stats
+val eio_stat : Unix.LargeFile.stats -> Eio.File.Stat.t
+(** Convert a {!Unix.LargeFile.stats} to an Eio stat (used for the [lstat] path
+    and the socket/pipe [fstat] fallback). *)
+
+val fstat : fd -> Eio.File.Stat.t
+(** Native by-handle stat: on a disk handle it queries
+    [GetFileInformationByHandle] directly (real dev/ino, 100ns times, link count,
+    block usage); on a socket/pipe it falls back to {!Unix.LargeFile.fstat}. *)
+
 val lstat : string -> Unix.LargeFile.stats
 
 val realpath : string -> string
@@ -55,12 +61,14 @@ val symlink : link_to:string -> fd option -> string -> unit
     linking to [link_to]. *)
 
 val chmod : mode:int -> fd option -> string -> unit
-(** [chmod ~mode path] is just a non-blocking call to {! Unix.chmod} when
-    [fd = None], otherwise it is unsupported. *)
+(** [chmod ~mode fd path] runs {!Unix.chmod} on the systhread pool when
+    [fd = None]; with a directory handle it raises [EOPNOTSUPP]. *)
 
-val readdir : string -> string array
+val read_dir_entries : fd -> (Eio.File.Stat.kind * string) list
+(** [read_dir_entries fd] enumerates the directory referred to by [fd] in a
+    single pass, returning each entry's kind and name together (skipping [.] and
+    [..]). The order is unspecified. *)
 
-val readv : fd -> Cstruct.t array -> int
 val writev : fd -> Cstruct.t list -> unit
 
 val preadv : file_offset:Optint.Int63.t -> fd -> Cstruct.t array -> int
@@ -114,9 +122,13 @@ module Flags : sig
   module Create : sig
     type t
 
+    val empty : t
+    (** No constraint on the kind of object opened (e.g. for [stat], which must
+        work on both files and directories). *)
+
     val directory : t
     (** Create a directory. *)
-    
+
     val non_directory : t
     (** Create something that is not a directory. *)
 
@@ -131,4 +143,5 @@ module Flags : sig
 end
 
 val openat : ?dirfd:fd -> ?nofollow:bool-> sw:Switch.t -> string -> Flags.Open.t -> Flags.Disposition.t -> Flags.Create.t -> fd
-(** Note: the returned FD is always non-blocking and close-on-exec. *)
+(** Note: the FD is close-on-exec and tagged non-blocking, though the underlying
+    handle is actually synchronous (see the caveat at the top of [low_level.ml]). *)

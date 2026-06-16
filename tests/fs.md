@@ -2,6 +2,13 @@
 
 ```ocaml
 # #require "eio_main";;
+```
+
+Windows has no `umask`, so this setup (which the file-permission checks below
+rely on) is skipped there:
+
+<!-- $MDX os_type<>Win32 -->
+```ocaml
 # ignore @@ Unix.umask 0o022;;
 - : unit = ()
 ```

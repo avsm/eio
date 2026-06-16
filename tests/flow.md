@@ -166,7 +166,11 @@ Make sure we don't crash on SIGPIPE:
   let r, w = Eio_unix.pipe sw in
   Eio.Flow.close r;
   try
-    Eio.Flow.copy_string "Test" w;
+    (* On Unix the first write to the broken pipe fails with EPIPE. On Windows
+       pipes are emulated with a socketpair (see {!Eio_unix.pipe}), which
+       buffers the first write and only reports the closed peer (ECONNRESET) on
+       a subsequent write, so keep writing until it fails. *)
+    for _ = 1 to 100 do Eio.Flow.copy_string "Test" w done;
     assert false
   with Eio.Io (Eio.Net.E Connection_reset _, _) ->
     traceln "Connection_reset (good)";;
@@ -177,6 +181,7 @@ Make sure we don't crash on SIGPIPE:
 Opening a FIFO with no writer should not block,
 but reading from it will wait for the writer:
 
+<!-- $MDX os_type<>Win32 -->
 ```ocaml
 # Eio_main.run @@ fun env ->
   let ( / ) = Eio.Path.( / ) in

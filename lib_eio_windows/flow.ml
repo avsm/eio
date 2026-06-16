@@ -1,41 +1,12 @@
 open Eio.Std
 
-module Fd = Eio_unix.Fd
-
 module Impl = struct
   type tag = [`Generic | `Unix]
 
   type t = Eio_unix.Fd.t
 
   let stat t =
-    try
-      let ust = Low_level.fstat t in
-      let st_kind : Eio.File.Stat.kind =
-        match ust.st_kind with
-        | Unix.S_REG  -> `Regular_file
-        | Unix.S_DIR  -> `Directory
-        | Unix.S_CHR  -> `Character_special
-        | Unix.S_BLK  -> `Block_device
-        | Unix.S_LNK  -> `Symbolic_link
-        | Unix.S_FIFO -> `Fifo
-        | Unix.S_SOCK -> `Socket
-      in
-      Eio.File.Stat.{
-        dev     = ust.st_dev   |> Int64.of_int;
-        ino     = ust.st_ino   |> Int64.of_int;
-        kind    = st_kind;
-        perm    = ust.st_perm;
-        nlink   = ust.st_nlink |> Int64.of_int;
-        uid     = ust.st_uid   |> Int64.of_int;
-        gid     = ust.st_gid   |> Int64.of_int;
-        rdev    = ust.st_rdev  |> Int64.of_int;
-        size    = ust.st_size  |> Optint.Int63.of_int64;
-        blksize = 0L;   (* Not available on Windows *)
-        blocks  = 0L;   (* Not available on Windows *)
-        atime   = ust.st_atime;
-        mtime   = ust.st_mtime;
-        ctime   = ust.st_ctime;
-      }
+    try Low_level.fstat t
     with Unix.Unix_error (code, name, arg) -> raise @@ Err.wrap code name arg
 
   let write_all t bufs =
@@ -47,7 +18,21 @@ module Impl = struct
     write_all t bufs;
     Cstruct.lenv bufs
 
-  let copy t ~src = Eio.Flow.Pi.simple_copy ~single_write t ~src
+  (* Copy using the [Read_source_buffer] optimisation, avoiding a copy when the
+     source already has the data in hand. *)
+  let copy_with_rsb rsb dst =
+    try while true do rsb (single_write dst) done
+    with End_of_file -> ()
+
+  let copy t ~src =
+    let Eio.Resource.T (src_t, ops) = src in
+    let module Src = (val (Eio.Resource.get ops Eio.Flow.Pi.Source)) in
+    let rec aux = function
+      | Eio.Flow.Read_source_buffer rsb :: _ -> copy_with_rsb (rsb src_t) t
+      | _ :: xs -> aux xs
+      | [] -> Eio.Flow.Pi.simple_copy ~single_write t ~src
+    in
+    aux Src.read_methods
 
   let single_read t buf =
     match Low_level.read_cstruct t buf with
@@ -74,9 +59,11 @@ module Impl = struct
 
   let pwrite t ~file_offset bufs = Low_level.pwritev ~file_offset t (Array.of_list bufs)
 
-  let send_msg _t ~fds:_ _data = failwith "Not implemented on Windows"
+  (* FD passing (SCM_RIGHTS) has no Windows equivalent; report it as a typed,
+     catchable [Eio.Io] error rather than a bare [Failure]. *)
+  let send_msg _t ~fds:_ _data = raise (Err.wrap Unix.EOPNOTSUPP "send_msg" "")
 
-  let recv_msg_with_fds _t ~sw:_ ~max_fds:_ _data = failwith "Not implemented on Windows"
+  let recv_msg_with_fds _t ~sw:_ ~max_fds:_ _data = raise (Err.wrap Unix.EOPNOTSUPP "recv_msg" "")
 
   let seek = Low_level.lseek
   let sync = Low_level.fsync
@@ -94,6 +81,31 @@ let handler = Eio_unix.Pi.flow_handler (module Impl)
 
 let of_fd fd =
   let r = Eio.Resource.T (fd, handler) in
+  (r : [`Unix_fd | Eio_unix.Net.stream_socket_ty | Eio.File.rw_ty] r :>
+     [< `Unix_fd | Eio_unix.Net.stream_socket_ty | Eio.File.rw_ty] r)
+
+(* Pipes are emulated with sockets (see {!Low_level.pipe}), so a peer that exits
+   can surface as [ECONNRESET]/[EPIPE]/[ECONNABORTED] rather than a clean
+   end-of-file. On the read side those just mean the data has ended, so treat them
+   as end-of-file (writes still surface the reset as an error, as on POSIX).
+   ([Low_level.normalise_error] already folds ERROR_NETNAME_DELETED /
+   ERROR_CONNECTION_ABORTED to [ECONNRESET]; the [ECONNABORTED] case here is a raw
+   WSAECONNABORTED completion.) *)
+module Pipe_impl = struct
+  include Impl
+
+  let single_read t buf =
+    match Low_level.read_cstruct t buf with
+    | 0 -> raise End_of_file
+    | got -> got
+    | exception Unix.Unix_error ((ECONNRESET | EPIPE | ECONNABORTED), _, _) -> raise End_of_file
+    | exception Unix.Unix_error (code, name, arg) -> raise (Err.wrap code name arg)
+end
+
+let pipe_handler = Eio_unix.Pi.flow_handler (module Pipe_impl)
+
+let of_pipe_source fd =
+  let r = Eio.Resource.T (fd, pipe_handler) in
   (r : [`Unix_fd | Eio_unix.Net.stream_socket_ty | Eio.File.rw_ty] r :>
      [< `Unix_fd | Eio_unix.Net.stream_socket_ty | Eio.File.rw_ty] r)
 

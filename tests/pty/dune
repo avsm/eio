@@ -1,0 +1,12 @@
+(executable
+ (name pty_exercise)
+ (modules pty_exercise pty_backend)
+ (libraries eio eio_main eio.unix cstruct
+  (select pty_backend.ml from
+   (eio_windows -> pty_backend.win32.ml)
+   (eio_posix   -> pty_backend.posix.ml))))
+
+(mdx
+ (package eio_main)
+ (files run.md)
+ (deps %{exe:pty_exercise.exe}))

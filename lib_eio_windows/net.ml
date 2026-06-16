@@ -61,13 +61,13 @@ module Datagram_socket = struct
 
   let send t ?dst buf =
     let dst = Option.map Eio_unix.Net.sockaddr_to_unix dst in
-    let sent = Err.run (Low_level.send_msg t ?dst) (Bytes.unsafe_of_string (Cstruct.copyv buf)) in
+    (* [buf] is a vector of bigarray-backed cstructs, which the overlapped send
+       pins and gathers directly — no copy through a temporary buffer. *)
+    let sent = Err.run (Low_level.send_msg t ?dst) buf in
     assert (sent = Cstruct.lenv buf)
 
   let recv t buf =
-    let b = Bytes.create (Cstruct.length buf) in
-    let recv, addr = Err.run (Low_level.recv_msg t) b in
-    Cstruct.blit_from_bytes b 0 buf 0 recv;
+    let recv, addr = Err.run (Low_level.recv_msg t) [buf] in
     Eio_unix.Net.sockaddr_of_unix_datagram addr, recv
 
   let shutdown t cmd =
@@ -89,26 +89,27 @@ let datagram_handler = Eio_unix.Pi.datagram_handler (module Datagram_socket)
 let datagram_socket fd =
   Eio.Resource.T (fd, datagram_handler)
 
+(* The native stub classifies each result as TCP or UDP by its socket type
+   (Windows doesn't set [ai_protocol] reliably) and returns [(is_stream, host,
+   port)] triples with the host as a numeric string. On failure it returns the
+   structured [Eio.Net.Getaddrinfo_error.t], mirroring the POSIX backend. *)
+external eio_getaddrinfo :
+  string -> string -> ((bool * string * int) list, Eio.Net.Getaddrinfo_error.t) result
+  = "caml_eio_windows_getaddrinfo"
+
 let getaddrinfo ~service node =
-  (* OCaml's [Unix.getaddrinfo] on Windows doesn't set [ai_protocol] to
-     anything useful, so you can't tell which addresses are TCP and which are
-     UDP. So, do two separate queries. *)
-  let get ty k =
-    Unix.getaddrinfo node service [AI_SOCKTYPE ty]
-    |> List.filter_map (function
-        | {Unix.ai_addr = ADDR_INET (host, port); _} ->
-          Some (k (Eio_unix.Net.Ipaddr.of_unix host, port))
-        | _ -> None
-      )
-  in
   Err.run (Eio_unix.run_in_systhread ~label:"getaddrinfo") @@ fun () ->
-  let rec aux () =
-    try
-      get SOCK_STREAM (fun x -> `Tcp x) @
-      get SOCK_DGRAM (fun x -> `Udp x)
-    with Unix.Unix_error (EINTR, _, _) -> aux ()
-  in
-  aux ()
+  match eio_getaddrinfo node service with
+  | Error e -> raise @@ Eio.Net.err @@ Eio.Net.Address_lookup_failed e
+  | Ok entries ->
+    (* The stub prepends as it iterates, so reverse to restore the OS ordering. *)
+    let addrs =
+      List.rev_map (fun (stream, host, port) ->
+          let addr = (Eio_unix.Net.Ipaddr.of_unix (Unix.inet_addr_of_string host), port) in
+          if stream then `Tcp addr else `Udp addr)
+        entries
+    in
+    (addrs :> Eio.Net.Sockaddr.t list)
 
 let listen ~reuse_addr ~reuse_port ~backlog ~sw (listen_addr : Eio.Net.Sockaddr.stream) =
   let socket_type, addr, is_unix_socket =
@@ -140,7 +141,7 @@ let listen ~reuse_addr ~reuse_port ~backlog ~sw (listen_addr : Eio.Net.Sockaddr.
          otherwise the Unix.bind will fail! *)
       if not is_unix_socket && reuse_addr then
         Unix.setsockopt fd Unix.SO_REUSEADDR true;
-      if reuse_port then
+      if not is_unix_socket && reuse_port then
         Unix.setsockopt fd Unix.SO_REUSEPORT true;
       Unix.bind fd addr;
       Unix.listen fd backlog

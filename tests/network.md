@@ -358,6 +358,9 @@ Printing addresses with ports:
 
 Wrapping a Unix FD as an Eio stream socket:
 
+<!-- Importing a Unix pipe FD as a stream socket relies on pipes and sockets
+     being interchangeable file descriptors, which they are not on Windows. -->
+<!-- $MDX os_type<>Win32 -->
 ```ocaml
 # Eio_main.run @@ fun _ ->
   Switch.run @@ fun sw ->
@@ -399,6 +402,8 @@ Exception: Graceful_shutdown.
 
 Wrapping a Unix FD as an datagram Eio socket:
 
+<!-- Windows has no PF_UNIX SOCK_DGRAM socketpair (raises EAFNOSUPPORT). -->
+<!-- $MDX os_type<>Win32 -->
 ```ocaml
 # Eio_main.run @@ fun _ ->
   Switch.run @@ fun sw ->
@@ -525,6 +530,10 @@ ECONNRESET:
 
 EPIPE:
 
+<!-- Writing to a stream socket whose peer has closed raises Connection_reset on
+     POSIX; Windows completes the write instead, so the recorded behaviour does
+     not hold there. -->
+<!-- $MDX os_type<>Win32 -->
 ```ocaml
 # Eio_main.run @@ fun _ ->
   Switch.run @@ fun sw ->
@@ -540,6 +549,9 @@ EPIPE:
 
 Connection refused:
 
+<!-- Connecting to a missing Unix-domain socket path reports a different error
+     kind on Windows (Net Connection_failure Refused vs Fs Not_found). -->
+<!-- $MDX os_type<>Win32 -->
 ```ocaml
 # Eio_main.run @@ fun env ->
   Switch.run @@ fun sw ->
@@ -714,6 +726,9 @@ Exception: Failure "Address_lookup_failed".
 
 ## getnameinfo
 
+<!-- Reverse-resolving 127.0.0.1 yields the machine's own hostname on Windows
+     rather than "localhost", so this depends on the host environment. -->
+<!-- $MDX os_type<>Win32 -->
 ```ocaml
 # Eio_main.run @@ fun env ->
   let sockaddr = `Tcp (Eio.Net.Ipaddr.V4.loopback, 80) in
@@ -849,6 +864,8 @@ Eio.Io Net Connection_failure Timeout,
 
 ## read/write on SOCK_DGRAM
 
+<!-- Windows has no PF_UNIX datagram socketpair. -->
+<!-- $MDX os_type<>Win32 -->
 ```ocaml
 # Eio_main.run @@ fun _ ->
   Switch.run @@ fun sw ->
