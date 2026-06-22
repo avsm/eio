@@ -130,6 +130,11 @@ module Private : sig
   val read_link_unix : Unix.file_descr option -> string -> string
   val chmod : Fd.t -> string -> flags:int -> mode:int -> unit
   val chmod_unix : Unix.file_descr -> string -> flags:int -> mode:int -> unit
+
+  val make_temp :
+    getrandom:(Cstruct.t -> unit) ->
+    dir:string -> prefix:string -> suffix:string ->
+    (string -> 'a) -> 'a * string
 end
 
 module Pi = Pi

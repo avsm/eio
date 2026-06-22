@@ -143,8 +143,45 @@ let is_directory t =
 let with_open_in path fn =
   Switch.run ~name:"with_open_in" @@ fun sw -> fn (open_in ~sw path)
 
-let with_open_out ?append ~create path fn =
-  Switch.run ~name:"with_open_out" @@ fun sw -> fn (open_out ~sw ?append ~create path)
+type Exn.Backend.t += Atomic_dest_exists of string
+let () =
+  Exn.Backend.register_pp (fun f -> function
+      | Atomic_dest_exists p -> Fmt.pf f "%S already exists" p; true
+      | _ -> false)
+
+let atomic_out (Resource.T (dir, ops) as dir_res, dest) ~perm ~replace fn =
+  let module D = (val (Resource.get ops Fs.Pi.Dir)) in
+  let parent = match Filename.dirname dest with "." -> "" | d -> d in
+  Switch.run ~name:"with_open_out" @@ fun sw ->
+  let flow, tmp = D.make_temp_file dir ~sw ~perm ~dir:parent ~prefix:"." ~suffix:".tmp" in
+  let remove_tmp () = try D.unlink dir tmp with _ -> () in
+  let commit () =
+    if not replace && kind ~follow:false (dir_res, dest) <> `Not_found then
+      raise (Fs.err (Fs.Already_exists (Atomic_dest_exists dest)));
+    D.rename dir tmp (dir_res :> _ Fs.dir) dest
+  in
+  (* TODO avsm Fun.protect here? *)
+  match fn flow with
+  | exception ex -> remove_tmp (); raise ex
+  | result ->
+    begin match commit () with
+      | () -> result
+      | exception ex -> remove_tmp (); raise ex
+    end
+
+let with_open_out ?(append=false) ?(atomic=false) ~create path fn =
+  if not atomic then
+    Switch.run ~name:"with_open_out" @@ fun sw -> fn (open_out ~sw ~append ~create path)
+  else begin
+    if append then invalid_arg "Eio.Path.with_open_out: ~append and ~atomic are incompatible";
+    let perm, replace =
+      match create with
+      | `Never -> invalid_arg "Eio.Path.with_open_out: ~atomic requires a create mode that creates the file"
+      | `If_missing perm | `Or_truncate perm -> perm, true
+      | `Exclusive perm -> perm, false
+    in
+    atomic_out path ~perm ~replace fn
+  end
 
 let with_subtree path fn =
   Switch.run ~name:"with_subtree" @@ fun sw -> fn (open_subtree ~sw path)
@@ -174,8 +211,8 @@ let load (t, path) =
     let bt = Printexc.get_raw_backtrace () in
     Exn.reraise_with_context ex bt "loading %a" pp (t, path)
 
-let save ?append ~create path data =
-  with_open_out ?append ~create path @@ fun flow ->
+let save ?append ?atomic ~create path data =
+  with_open_out ?append ?atomic ~create path @@ fun flow ->
   Flow.copy_string data flow
 
 let unlink ?(missing_ok=false) t =
@@ -266,3 +303,29 @@ let read_link t =
   with Exn.Io _ as ex ->
     let bt = Printexc.get_raw_backtrace () in
     Exn.reraise_with_context ex bt "reading target of symlink %a" pp t
+
+let open_tmp_file ~sw ?(perm=0o600) t =
+  let (Resource.T (dir, ops), path) = t in
+  let module X = (val (Resource.get ops Fs.Pi.Dir)) in
+  try X.open_tmpfile dir ~sw ~perm ~dir:path
+  with Exn.Io _ as ex ->
+    let bt = Printexc.get_raw_backtrace () in
+    Exn.reraise_with_context ex bt "creating temporary file in %a" pp t
+
+let with_tmp_file ?perm t fn =
+  Switch.run ~name:"with_tmp_file" @@ fun sw -> fn (open_tmp_file ~sw ?perm t)
+
+let open_tmp_dir ~sw ?(cleanup=true) ?(perm=0o700) ?(prefix="") ?(suffix="") t =
+  let (Resource.T (dir, ops) as dir_res, path) = t in
+  let module X = (val (Resource.get ops Fs.Pi.Dir)) in
+  try
+    let sub, name = X.make_temp_dir dir ~sw ~perm ~dir:path ~prefix ~suffix in
+    if cleanup then Switch.on_release sw (fun () -> rmtree ~missing_ok:true (dir_res, name));
+    ((sub, "") : [`Close | `Dir] t :> [< `Close | `Dir] t)
+  with Exn.Io _ as ex ->
+    let bt = Printexc.get_raw_backtrace () in
+    Exn.reraise_with_context ex bt "creating temporary directory in %a" pp t
+
+let with_tmp_dir ?cleanup ?perm ?prefix ?suffix t fn =
+  Switch.run ~name:"with_tmp_dir" @@ fun sw ->
+  fn (open_tmp_dir ~sw ?cleanup ?perm ?prefix ?suffix t)

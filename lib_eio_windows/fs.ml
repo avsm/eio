@@ -200,6 +200,34 @@ end = struct
     with_parent_dir t path @@ fun dirfd path ->
     Err.run (Low_level.chmod ~mode:perm dirfd) path
 
+  let make_temp_dir t ~sw ~perm ~dir ~prefix ~suffix =
+    Eio_unix.Private.make_temp ~getrandom:Low_level.getrandom ~dir ~prefix ~suffix @@ fun name ->
+    with_parent_dir t name (fun dirfd leaf -> Err.run (Low_level.mkdir ?dirfd ~mode:perm) leaf);
+    open_subtree t ~sw name
+
+  let make_temp_file t ~sw ~perm:_ ~dir ~prefix ~suffix =
+    let open Low_level in
+    Eio_unix.Private.make_temp ~getrandom:Low_level.getrandom ~dir ~prefix ~suffix @@ fun name ->
+    let fd =
+      with_parent_dir t name @@ fun dirfd name ->
+      Err.run
+        (Low_level.openat ?dirfd ~nofollow:(opt_nofollow t) ~sw name
+           Flags.Open.(generic_read + generic_write + synchronise)
+           Flags.Disposition.create)             (* CREATE_NEW: fail if it exists *)
+        Flags.Create.non_directory
+    in
+    (Flow.of_fd fd :> Eio.File.rw_ty r)
+
+  let open_tmpfile t ~sw ~perm ~dir =
+    (* Windows cannot unlink a file while it is still open, so we remove the name
+       only once [sw] has closed the file. Registering the cleanup before the
+       file is created ensures it runs after the file has been closed. *)
+    let name = ref None in
+    Switch.on_release sw (fun () -> Option.iter (fun n -> try unlink t n with _ -> ()) !name);
+    let flow, created = make_temp_file t ~sw ~perm ~dir ~prefix:"." ~suffix:".tmp" in
+    name := Some created;
+    flow
+
   let pp f t = Fmt.string f (String.escaped t.label)
 
   let native _t _path =

@@ -499,6 +499,32 @@ end = struct
   let chmod t ~follow ~perm path =
     Low_level.chmod t.fd ~follow ~mode:perm path
 
+  let make_temp_dir t ~sw ~perm ~dir ~prefix ~suffix =
+    Eio_unix.Private.make_temp ~getrandom:Low_level.getrandom ~dir ~prefix ~suffix @@ fun name ->
+    Low_level.mkdir ~perm t.fd name;
+    open_subtree t ~sw name
+
+  let make_temp_file t ~sw ~perm ~dir ~prefix ~suffix =
+    Eio_unix.Private.make_temp ~getrandom:Low_level.getrandom ~dir ~prefix ~suffix @@ fun name ->
+    let fd =
+      Low_level.openat ~sw t.fd name
+        ~access:`RW
+        ~flags:Uring.Open_flags.(cloexec + creat + excl)
+        ~perm
+    in
+    (Flow.of_fd fd :> Eio.File.rw_ty r)
+
+  let open_tmpfile t ~sw ~perm ~dir =
+    (* Create an unnamed inode directly with O_TMPFILE. It never has a name in the
+       directory and its storage is freed automatically when the fd is closed. *)
+    let fd =
+      Low_level.openat ~sw t.fd (if dir = "" then "." else dir)
+        ~access:`RW
+        ~flags:Uring.Open_flags.(cloexec + tmpfile)
+        ~perm
+    in
+    (Flow.of_fd fd :> Eio.File.rw_ty r)
+
   let pp f t = Fmt.string f (String.escaped t.label)
 
   let fd t = t.fd

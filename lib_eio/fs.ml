@@ -75,6 +75,11 @@ module Pi = struct
     val chmod : t -> follow:bool -> perm:File.Unix_perm.t -> path -> unit
     val pp : t Fmt.t
     val native : t -> string -> string option
+    val make_temp_dir : t -> sw:Switch.t -> perm:File.Unix_perm.t -> dir:path ->
+      prefix:string -> suffix:string -> [`Close | dir_ty] r * path
+    val make_temp_file : t -> sw:Switch.t -> perm:File.Unix_perm.t -> dir:path ->
+      prefix:string -> suffix:string -> File.rw_ty r * path
+    val open_tmpfile : t -> sw:Switch.t -> perm:File.Unix_perm.t -> dir:path -> File.rw_ty r
   end
 
   type (_, _, _) Resource.pi +=

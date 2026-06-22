@@ -104,10 +104,12 @@ val with_lines : _ t -> (string Seq.t -> 'a) -> 'a
 
 (** {1 Writing files} *)
 
-val save : ?append:bool -> create:create -> _ t -> string -> unit
+val save : ?append:bool -> ?atomic:bool -> create:create -> _ t -> string -> unit
 (** [save t data ~create] writes [data] to [t].
 
-    This is a convenience wrapper around {!with_open_out}. *)
+    This is a convenience wrapper around {!with_open_out}.
+
+    @param atomic See {!with_open_out}. *)
 
 val open_out :
   sw:Switch.t ->
@@ -122,6 +124,7 @@ val open_out :
 
 val with_open_out :
   ?append:bool ->
+  ?atomic:bool ->
   create:create ->
   _ t -> (File.rw_ty r -> 'a) -> 'a
 (** [with_open_out] is like [open_out], but calls [fn flow] with the new flow and closes
@@ -176,6 +179,65 @@ val with_dir_entries : _ t -> ((File.Stat.kind * string) Seq.t -> 'a) -> 'a
     This is like {!read_dir_entries}, but loads the entries incrementally,
     which may be more efficient. Unlike {!read_dir_entries}, it does not sort
     the results, which may be returned in any order. *)
+
+(** {1 Temporary files and directories}
+
+    These create fresh, uniquely-named entries within an existing directory,
+    using the operating system's secure primitives to pick an unpredictable
+    name. To use the system temporary directory as the parent, combine
+    {!Eio.Stdenv.fs} with [Filename.get_temp_dir_name]:
+
+    {[
+      let tmp = Eio.Stdenv.fs env / Filename.get_temp_dir_name () in
+      Eio.Path.with_tmp_dir tmp @@ fun dir ->
+      ...
+    ]} *)
+
+val with_tmp_file : ?perm:File.Unix_perm.t -> _ t -> (File.rw_ty r -> 'a) -> 'a
+(** [with_tmp_file dir fn] creates a fresh, anonymous temporary file within [dir],
+    open for reading and writing, and calls [fn file] with it.
+
+    The file has no name: it is not linked into [dir], so it never appears in
+    {!read_dir} and cannot be reached by any path. It is accessible only through
+    the flow passed to [fn], and its storage is reclaimed automatically when the
+    flow is closed (when [fn] returns or raises) or when the process exits. This
+    makes it well suited to scratch data that might outgrow memory.
+
+    On Linux the file is created directly as an unnamed inode ([O_TMPFILE]); on
+    other Unix systems it is created and then unlinked immediately. Either way it
+    is anonymous from the moment [fn] runs. On Windows, which cannot unlink an
+    open file, the underlying name persists until the file is closed.
+
+    @param perm The permissions for the new file (default [0o600]).
+    @since 1.4 *)
+
+val open_tmp_file : sw:Switch.t -> ?perm:File.Unix_perm.t -> _ t -> File.rw_ty r
+(** [open_tmp_file ~sw dir] is like {!with_tmp_file}, but the file is closed (and
+    so removed) when [sw] finishes rather than at the end of a function.
+
+    @since 1.4 *)
+
+val with_tmp_dir :
+  ?cleanup:bool -> ?perm:File.Unix_perm.t -> ?prefix:string -> ?suffix:string ->
+  _ t -> ([< `Close | dir_ty] t -> 'a) -> 'a
+(** [with_tmp_dir dir fn] creates a fresh, uniquely-named temporary directory
+    within [dir], calls [fn tmp] with it, and removes it (recursively) when [fn]
+    returns or raises.
+
+    @param cleanup If [true] (the default), remove the directory and its contents
+                   when the switch finishes.
+    @param perm The permissions for the new directory (default [0o700]).
+    @param prefix Prepended to the random name (default [""]).
+    @param suffix Appended to the random name (default [""]).
+    @since 1.4 *)
+
+val open_tmp_dir :
+  sw:Switch.t -> ?cleanup:bool -> ?perm:File.Unix_perm.t -> ?prefix:string -> ?suffix:string ->
+  _ t -> [< `Close | dir_ty] t
+(** [open_tmp_dir ~sw dir] is like {!with_tmp_dir}, but the directory is removed
+    when [sw] finishes rather than at the end of a function.
+
+    @since 1.4 *)
 
 (** {1 Metadata} *)
 

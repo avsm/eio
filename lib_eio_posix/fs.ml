@@ -133,6 +133,23 @@ end = struct
     let d = v ~label ~path:full_path (Fd fd) in
     Eio.Resource.T (d, Handler.v)
 
+  let make_temp_dir t ~sw ~perm ~dir ~prefix ~suffix =
+    Eio_unix.Private.make_temp ~getrandom:Low_level.getrandom ~dir ~prefix ~suffix @@ fun name ->
+    Err.run (Low_level.mkdir ~mode:perm t.fd) name;
+    open_subtree t ~sw name
+
+  let make_temp_file t ~sw ~perm ~dir ~prefix ~suffix =
+    Eio_unix.Private.make_temp ~getrandom:Low_level.getrandom ~dir ~prefix ~suffix @@ fun name ->
+    let fd = Err.run (Low_level.openat ~sw ~mode:perm t.fd name) Low_level.Open_flags.(creat + excl + rdwr) in
+    (Flow.of_fd fd :> Eio.File.rw_ty r)
+
+  let open_tmpfile t ~sw ~perm ~dir =
+    let flow, name = make_temp_file t ~sw ~perm ~dir ~prefix:"." ~suffix:".tmp" in
+    (* Unlink the name immediately; the open fd keeps the file alive until it is
+       closed, so it never appears in the directory. *)
+    unlink t name;
+    flow
+
   let pp f t = Fmt.string f (String.escaped t.label)
 
   let native_internal t path =
