@@ -61,24 +61,29 @@ let get_executable ~args = function
     match args with
     | [] -> invalid_arg "Arguments list is empty and no executable given!"
     | (x :: _) ->
-      match resolve_program x with
-      | Some x -> x
-      | None -> raise (Eio.Process.err (Executable_not_found x))
+      if Sys.win32 then "" (* this means to resolve the path *)
+      else match resolve_program x with
+        | Some x -> x
+        | None -> raise (Eio.Process.err (Executable_not_found x))
 
 let get_env = function
   | Some e -> e
   | None -> Unix.environment ()
 
-let translate_execve_error ~executable f =
+let translate_spawn_error ~executable ~args f =
+  let exe () =
+    if executable <> "" then executable (* For Win32 *)
+    else match args with x :: _ -> x | [] -> ""
+  in
   try f () with
-  | Unix.Unix_error (Unix.E2BIG, "execve", _) ->
+  | Unix.Unix_error (Unix.E2BIG, ("execve" | "spawn"), _) ->
     raise (Eio.Process.err Eio.Process.Argument_list_too_long)
-  | Unix.Unix_error (Unix.ENOENT, "execve", _) ->
-    raise (Eio.Process.err (Executable_not_found executable))
-  | Unix.Unix_error (Unix.EACCES, "execve", _) ->
-    raise (Eio.Process.err (Permission_denied executable))
-  | Unix.Unix_error (Unix.ENOEXEC, "execve", _) ->
-    raise (Eio.Process.err (Executable_format_error executable))
+  | Unix.Unix_error (Unix.ENOENT, ("execve" | "spawn"), _) ->
+    raise (Eio.Process.err (Executable_not_found (exe ())))
+  | Unix.Unix_error (Unix.EACCES, ("execve" | "spawn"), _) ->
+    raise (Eio.Process.err (Permission_denied (exe ())))
+  | Unix.Unix_error (Unix.ENOEXEC, ("execve" | "spawn"), _) ->
+    raise (Eio.Process.err (Executable_format_error (exe ())))
 
 type ty = [ `Generic | `Unix ] Eio.Process.ty
 type 'a t = ([> ty] as 'a) r
@@ -152,7 +157,7 @@ end) = struct
       1, stdout_fd, `Blocking;
       2, stderr_fd, `Blocking;
     ] in
-    translate_execve_error ~executable @@ fun () ->
+    translate_spawn_error ~executable ~args @@ fun () ->
     X.spawn_unix v ~sw ?cwd ~env ~fds ~executable args
 
   let spawn_unix = X.spawn_unix
@@ -162,7 +167,7 @@ let spawn_unix ~sw (Eio.Resource.T (v, ops)) ?cwd ?pgid ?uid ?gid ?login_tty ~fd
   let module X = (val (Eio.Resource.get ops Pi.Mgr_unix)) in
   let executable = get_executable executable ~args in
   let env = get_env env in
-  translate_execve_error ~executable @@ fun () ->
+  translate_spawn_error ~executable ~args @@ fun () ->
   X.spawn_unix v ~sw ?cwd ?pgid ?uid ?gid ?login_tty ~fds ~env ~executable args
 
 let sigchld = Eio.Condition.create ()
