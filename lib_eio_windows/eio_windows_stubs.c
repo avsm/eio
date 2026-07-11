@@ -415,3 +415,231 @@ CAMLprim value caml_eio_windows_process_terminate(value v_handle, value v_code)
   TerminateProcess(Handle_val(v_handle), (UINT)Long_val(v_code));
   CAMLreturn(Val_unit);
 }
+
+/* ---- Pseudoterminal support (ConPTY) --------------------------------------
+
+   The Windows Pseudo Console API (Windows 10 1809+) is resolved dynamically so
+   the binary stays loadable on older systems. */
+typedef HRESULT (WINAPI *pCreatePseudoConsole)(COORD, HANDLE, HANDLE, DWORD, void **);
+typedef HRESULT (WINAPI *pResizePseudoConsole)(void *, COORD);
+typedef void    (WINAPI *pClosePseudoConsole)(void *);
+
+#ifndef PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE
+#define PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE 0x00020016
+#endif
+
+static pCreatePseudoConsole eio_CreatePseudoConsole(void)
+{
+  static pCreatePseudoConsole fn = NULL;
+  static int tried = 0;
+  if (!tried) { tried = 1; fn = (pCreatePseudoConsole)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "CreatePseudoConsole"); }
+  return fn;
+}
+
+static pResizePseudoConsole eio_ResizePseudoConsole(void)
+{
+  static pResizePseudoConsole fn = NULL;
+  static int tried = 0;
+  if (!tried) { tried = 1; fn = (pResizePseudoConsole)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "ResizePseudoConsole"); }
+  return fn;
+}
+
+static pClosePseudoConsole eio_ClosePseudoConsole(void)
+{
+  static pClosePseudoConsole fn = NULL;
+  static int tried = 0;
+  if (!tried) { tried = 1; fn = (pClosePseudoConsole)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "ClosePseudoConsole"); }
+  return fn;
+}
+
+static void eio_hresult_error(HRESULT hr, const char *cmdname)
+{
+  DWORD err = (HRESULT_FACILITY(hr) == FACILITY_WIN32) ? (DWORD)HRESULT_CODE(hr) : (DWORD)hr;
+  caml_win32_maperr(err);
+  uerror(cmdname, Nothing);
+}
+
+#define Conpty_val(v) (*((void **)Data_custom_val(v)))
+
+static void eio_conpty_finalize(value v)
+{
+  void *h = Conpty_val(v);
+  if (h) {
+    pClosePseudoConsole close_fn = eio_ClosePseudoConsole();
+    if (close_fn) close_fn(h);
+    Conpty_val(v) = NULL;
+  }
+}
+
+static struct custom_operations eio_conpty_ops = {
+  .identifier = "eio.windows.conpty",
+  .finalize = eio_conpty_finalize,
+  .compare = NULL,
+  .hash = NULL,
+  .serialize = NULL,
+  .deserialize = NULL,
+};
+
+static value eio_alloc_conpty(void *h)
+{
+  value v = caml_alloc_custom(&eio_conpty_ops, sizeof(void *), 0, 1);
+  Conpty_val(v) = h;
+  return v;
+}
+
+CAMLprim value caml_eio_windows_open_pty_pipes(value v_unit)
+{
+  CAMLparam1(v_unit);
+  CAMLlocal1(v_result);
+  HANDLE in_read = NULL, in_write = NULL, out_read = NULL, out_write = NULL;
+  DWORD err;
+  /* Use a generous buffer so the console pump doesn't stall on a slow reader. */
+  if (!CreatePipe(&in_read, &in_write, NULL, 65536)) {
+    err = GetLastError();
+    caml_win32_maperr(err);
+    uerror("open_pty", Nothing);
+  }
+  if (!CreatePipe(&out_read, &out_write, NULL, 65536)) {
+    err = GetLastError();
+    CloseHandle(in_read); CloseHandle(in_write);
+    caml_win32_maperr(err);
+    uerror("open_pty", Nothing);
+  }
+
+  v_result = caml_alloc_tuple(4);
+  Store_field(v_result, 0, caml_win32_alloc_handle(in_read));
+  Store_field(v_result, 1, caml_win32_alloc_handle(in_write));
+  Store_field(v_result, 2, caml_win32_alloc_handle(out_read));
+  Store_field(v_result, 3, caml_win32_alloc_handle(out_write));
+  CAMLreturn(v_result);
+}
+
+CAMLprim value caml_eio_windows_conpty_create(value v_size, value v_in_read, value v_out_write)
+{
+  CAMLparam3(v_size, v_in_read, v_out_write);
+  COORD size;
+  HANDLE in_read, out_write;
+  void *hpc = NULL;
+  HRESULT hr;
+  pCreatePseudoConsole create_fn = eio_CreatePseudoConsole();
+  if (!create_fn)
+    caml_unix_error(EOPNOTSUPP, "open_pty", Nothing);
+
+  size.Y = (SHORT)Long_val(Field(v_size, 0)); /* rows */
+  size.X = (SHORT)Long_val(Field(v_size, 1)); /* cols */
+  in_read = Handle_val(v_in_read);
+  out_write = Handle_val(v_out_write);
+
+  caml_enter_blocking_section();
+  hr = create_fn(size, in_read, out_write, 0, &hpc);
+  caml_leave_blocking_section();
+  if (FAILED(hr))
+    eio_hresult_error(hr, "open_pty");
+
+  CAMLreturn(eio_alloc_conpty(hpc));
+}
+
+CAMLprim value caml_eio_windows_conpty_resize(value v_conpty, value v_size)
+{
+  CAMLparam2(v_conpty, v_size);
+  COORD size;
+  HRESULT hr;
+  void *h = Conpty_val(v_conpty);
+  pResizePseudoConsole resize_fn = eio_ResizePseudoConsole();
+  if (!resize_fn)
+    caml_unix_error(EOPNOTSUPP, "resize", Nothing);
+
+  size.Y = (SHORT)Long_val(Field(v_size, 0)); /* rows */
+  size.X = (SHORT)Long_val(Field(v_size, 1)); /* cols */
+  hr = resize_fn(h, size);
+  if (FAILED(hr))
+    eio_hresult_error(hr, "resize");
+  CAMLreturn(Val_unit);
+}
+
+CAMLprim value caml_eio_windows_conpty_close(value v_conpty)
+{
+  CAMLparam1(v_conpty);
+  void *h = Conpty_val(v_conpty);
+  if (h) {
+    pClosePseudoConsole close_fn = eio_ClosePseudoConsole();
+    if (close_fn) {
+      caml_enter_blocking_section();
+      close_fn(h);
+      caml_leave_blocking_section();
+    }
+    Conpty_val(v_conpty) = NULL;
+  }
+  CAMLreturn(Val_unit);
+}
+
+CAMLprim value caml_eio_windows_spawn_pty(value v_cwd, value v_env, value v_exe,
+                                          value v_conpty, value v_cmdline)
+{
+  CAMLparam5(v_cwd, v_env, v_exe, v_conpty, v_cmdline);
+  CAMLlocal1(v_result);
+
+  wchar_t *cmdline = NULL, *cwd = NULL, *exe = NULL, *env_block = NULL;
+  STARTUPINFOEXW si;
+  PROCESS_INFORMATION pi;
+  SIZE_T attr_size = 0;
+  BOOL ok = FALSE;
+  DWORD err = 0;
+  DWORD create_flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT;
+  void *hpc = Conpty_val(v_conpty);
+
+  memset(&si, 0, sizeof(si));
+  memset(&pi, 0, sizeof(pi));
+
+  cmdline = caml_stat_strdup_to_utf16(String_val(v_cmdline));
+  if (caml_string_length(v_cwd) > 0) cwd = caml_stat_strdup_to_utf16(String_val(v_cwd));
+  if (caml_string_length(v_exe) > 0) exe = caml_stat_strdup_to_utf16(String_val(v_exe));
+  if (Wosize_val(v_env) > 0) env_block = eio_build_env_block(v_env);
+
+  si.StartupInfo.cb = sizeof(STARTUPINFOEXW);
+  si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+  si.StartupInfo.hStdInput = NULL;
+  si.StartupInfo.hStdOutput = NULL;
+  si.StartupInfo.hStdError = NULL;
+
+  InitializeProcThreadAttributeList(NULL, 1, 0, &attr_size);
+  si.lpAttributeList = caml_stat_alloc(attr_size);
+  if (!InitializeProcThreadAttributeList(si.lpAttributeList, 1, 0, &attr_size)) {
+    err = GetLastError();
+    caml_stat_free(si.lpAttributeList);
+    si.lpAttributeList = NULL;
+    goto cleanup;
+  }
+  if (!UpdateProcThreadAttribute(si.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+                                 hpc, sizeof(hpc), NULL, NULL)) {
+    err = GetLastError();
+    goto cleanup;
+  }
+
+  caml_enter_blocking_section();
+  ok = CreateProcessW(exe, cmdline, NULL, NULL, FALSE,
+                      create_flags, env_block, cwd, &si.StartupInfo, &pi);
+  if (!ok) err = GetLastError();
+  caml_leave_blocking_section();
+
+cleanup:
+  if (si.lpAttributeList) {
+    DeleteProcThreadAttributeList(si.lpAttributeList);
+    caml_stat_free(si.lpAttributeList);
+  }
+  caml_stat_free(cmdline);
+  if (cwd) caml_stat_free(cwd);
+  if (exe) caml_stat_free(exe);
+  if (env_block) caml_stat_free(env_block);
+
+  if (!ok) {
+    caml_win32_maperr(err);
+    uerror("spawn", Nothing);
+  }
+
+  CloseHandle(pi.hThread);
+  v_result = caml_alloc_tuple(2);
+  Store_field(v_result, 0, Val_long(pi.dwProcessId));
+  Store_field(v_result, 1, caml_win32_alloc_handle(pi.hProcess));
+  CAMLreturn(v_result);
+}

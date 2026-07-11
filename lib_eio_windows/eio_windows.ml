@@ -15,6 +15,7 @@
  *)
 
 module Low_level = Low_level
+module Pty = Pty
 
 type stdenv = Eio_unix.Stdenv.base
 

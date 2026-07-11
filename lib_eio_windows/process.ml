@@ -8,6 +8,11 @@ external eio_spawn :
   string -> int * Unix.file_descr
   = "caml_eio_windows_spawn_bytes" "caml_eio_windows_spawn"
 
+(* Like [eio_spawn], but attaches the child to a pseudoconsole *)
+external eio_spawn_pty :
+  string -> string array -> string -> Pty.conpty -> string -> int * Unix.file_descr
+  = "caml_eio_windows_spawn_pty"
+
 external eio_process_wait : Unix.file_descr -> int = "caml_eio_windows_process_wait"
 external eio_process_terminate : Unix.file_descr -> int -> unit = "caml_eio_windows_process_terminate"
 
@@ -134,11 +139,21 @@ module Mgr = struct
     if pgid <> None || uid <> None || gid <> None then
       Fmt.invalid_arg "spawn: pgid/uid/gid are not supported on Windows";
     (* An arbitrary fd cannot be a controlling terminal on Windows. *)
-    if login_tty <> None then
-      Fmt.invalid_arg "spawn: login_tty is not supported on Windows";
-    List.iter (fun (i, _, _) ->
-        if i > 2 then Fmt.invalid_arg "spawn: only fds 0-2 are supported on Windows (got fd %d)" i)
-      fds;
+    let pty =
+      match login_tty with
+      | None -> None
+      | Some fd ->
+        match Pty.lookup fd with
+        | Some pty -> Some pty
+        | None -> Fmt.invalid_arg "spawn: login_tty is not an eio_windows pty"
+    in
+    (match pty with
+     | Some _ when fds <> [] ->
+       Fmt.invalid_arg "spawn: ~fds cannot be combined with a pty login_tty on Windows"
+     | _ ->
+       List.iter (fun (i, _, _) ->
+           if i > 2 then Fmt.invalid_arg "spawn: only fds 0-2 are supported on Windows (got fd %d)" i)
+         fds);
     let cwd =
       match cwd with
       | None -> ""
@@ -149,19 +164,23 @@ module Mgr = struct
         end
     in
     let cmdline = command_line args in
-    let find n = List.find_map (fun (i, fd, _) -> if i = n then Some fd else None) fds in
-    let get n name =
-      match find n with
-      | Some fd -> fd
-      | None -> Fmt.invalid_arg "spawn: no file descriptor for %s (fd %d)" name n
-    in
-    let stdin_fd = get 0 "stdin" and stdout_fd = get 1 "stdout" and stderr_fd = get 2 "stderr" in
     let pid, raw_handle =
       wrap_spawn_error ~executable ~args @@ fun () ->
-      Fd.use_exn "stdin" stdin_fd @@ fun h0 ->
-      Fd.use_exn "stdout" stdout_fd @@ fun h1 ->
-      Fd.use_exn "stderr" stderr_fd @@ fun h2 ->
-      eio_spawn cwd env executable h0 h1 h2 cmdline
+      match pty with
+      | Some pty ->
+        eio_spawn_pty cwd env executable (Pty.hpcon pty) cmdline
+      | None ->
+        let find n = List.find_map (fun (i, fd, _) -> if i = n then Some fd else None) fds in
+        let get n name =
+          match find n with
+          | Some fd -> fd
+          | None -> Fmt.invalid_arg "spawn: no file descriptor for %s (fd %d)" name n
+        in
+        let stdin_fd = get 0 "stdin" and stdout_fd = get 1 "stdout" and stderr_fd = get 2 "stderr" in
+        Fd.use_exn "stdin" stdin_fd @@ fun h0 ->
+        Fd.use_exn "stdout" stdout_fd @@ fun h1 ->
+        Fd.use_exn "stderr" stderr_fd @@ fun h2 ->
+        eio_spawn cwd env executable h0 h1 h2 cmdline
     in
     let handle = Fd.of_unix ~sw ~blocking:true ~close_unix:true raw_handle in
     let t = { Process.pid; handle; status = None; lock = Eio.Mutex.create () } in
