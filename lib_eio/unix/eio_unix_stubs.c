@@ -130,6 +130,7 @@ CAMLprim value eio_unix_fchownat(value v_fd, value v_path, value v_uid, value v_
 #endif
 }
 
+#ifndef _WIN32
 static int caml_eai_of_unix(int eai) {
   switch (eai) {
     // These numbers must match the order of constructors in Eio.Net.Getaddrinfo_error.t
@@ -159,6 +160,7 @@ static int caml_eai_of_unix(int eai) {
     default: return 0;
   }
 }
+#endif /* !_WIN32 */
 
 CAMLprim value eio_unix_getaddrinfo(value v_node, value v_service) {
 #ifdef _WIN32
