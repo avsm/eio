@@ -291,6 +291,10 @@ let pipe ~sw =
   let unix_r, unix_w = Unix.pipe ~cloexec:true () in
   let r = Fd.of_unix ~sw ~blocking:false ~close_unix:true unix_r in
   let w = Fd.of_unix ~sw ~blocking:false ~close_unix:true unix_w in
-  Unix.set_nonblock unix_r;
-  Unix.set_nonblock unix_w;
+  (* A pipe FD cannot be non-blocking on Windows *)
+  let try_set_nonblock fd =
+    try Unix.set_nonblock fd with Unix.Unix_error (Unix.ENOTSOCK, _, _) -> ()
+  in
+  try_set_nonblock unix_r;
+  try_set_nonblock unix_w;
   r, w
