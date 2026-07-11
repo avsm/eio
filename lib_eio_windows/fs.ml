@@ -37,6 +37,9 @@ module rec Dir : sig
       For unrestricted access, this returns [path] unchanged.
       @raise Eio.Fs.Permission_denied if sandboxed and [path] is outside of [dir_path]. *)
 
+  val strip_nt_prefix : string -> string
+  (** [strip_nt_prefix p] removes the NT-namespace prefix if present, yielding a Win32 path. *)
+
   val with_parent_dir : t -> string -> (Fd.t option -> string -> 'a) -> 'a
   (** [with_parent_dir t path fn] runs [fn dir_fd rel_path],
       where [rel_path] accessed relative to [dir_fd] gives access to [path].
@@ -68,6 +71,12 @@ end = struct
         raise @@ Eio.Fs.err (Permission_denied Err.Absolute_path)
       )
     ) else path
+
+  let strip_nt_prefix p =
+    let prefix = "\\??\\" in
+    if String.starts_with ~prefix p
+    then String.sub p (String.length prefix) (String.length p - String.length prefix)
+    else p
 
   let with_parent_dir t path fn =
     if t.sandbox then (
