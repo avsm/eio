@@ -38,6 +38,10 @@ module Impl = struct
   let single_write t bufs = Flow.Pipe_impl.single_write t.sink bufs
   let copy t ~src = Flow.Pipe_impl.copy t.sink ~src
 
+  let send_keys t s = ignore (Flow.Pipe_impl.single_write t.sink [ Cstruct.of_string s ] : int)
+  let interrupt t = send_keys t "\x03"
+  let send_eof t = send_keys t "\x1a\r"
+
   let tty _ = None
   let pty _ = None
 end

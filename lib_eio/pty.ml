@@ -40,6 +40,8 @@ module Pi = struct
     val name : t -> string
     val resize : t -> winsize -> unit
     val window_size : t -> winsize
+    val interrupt : t -> unit
+    val send_eof : t -> unit
   end
 
   type (_, _, _) Resource.pi +=
@@ -73,3 +75,13 @@ let window_size (t : [> pty_ty] r) =
   let (Resource.T (v, ops)) = t in
   let module X = (val (Resource.get ops Pi.Pty)) in
   X.window_size v
+
+let interrupt (t : [> pty_ty] r) =
+  let (Resource.T (v, ops)) = t in
+  let module X = (val (Resource.get ops Pi.Pty)) in
+  X.interrupt v
+
+let send_eof (t : [> pty_ty] r) =
+  let (Resource.T (v, ops)) = t in
+  let module X = (val (Resource.get ops Pi.Pty)) in
+  X.send_eof v

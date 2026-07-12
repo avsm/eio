@@ -85,6 +85,16 @@ module Posix = struct
   let single_write t bufs = hangup_is_reset (fun () -> Eio.Flow.single_write t.flow bufs)
   let copy t ~src = hangup_is_reset (fun () -> Eio.Flow.copy src t.flow)
 
+  let send_control_char t ~fallback get =
+    let c =
+      match get (Fd.use_exn "tcgetattr" t.tty_fd Unix.tcgetattr) with
+      | '\000' -> fallback
+      | c -> c in
+    hangup_is_reset (fun () -> Eio.Flow.write t.flow [ Cstruct.of_string (String.make 1 c) ])
+
+  let interrupt t = send_control_char t ~fallback:'\003' (fun a -> a.Unix.c_vintr)
+  let send_eof t = send_control_char t ~fallback:'\004' (fun a -> a.Unix.c_veof)
+
   let tty t = Some t.tty_fd
   let pty t = Some t.master
 end

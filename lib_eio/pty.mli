@@ -50,13 +50,19 @@ val name : _ t -> string
     on systems where it has one). *)
 
 val resize : _ t -> winsize -> unit
-(** [resize t size] sets the terminal window size.
-
-    On POSIX systems this also delivers [SIGWINCH] to the foreground process
-    group attached to the terminal. *)
+(** [resize t size] sets the terminal window size. *)
 
 val window_size : _ t -> winsize
 (** [window_size t] is the current terminal window size. *)
+
+val interrupt : _ t -> unit
+(** [interrupt t] does what the user's interrupt keystroke (Ctrl-C) would do:
+    requests the terminal to interrupt the child attached to it. *)
+
+val send_eof : _ t -> unit
+(** [send_eof t] signals end-of-input to the child as a keystroke would.
+    Like {!interrupt}, this is interpreted by the terminal's input cooking,
+    so a raw-mode child sees the control characters as input instead. *)
 
 (** {2 Provider Interface} *)
 
@@ -67,6 +73,8 @@ module Pi : sig
     val name : t -> string
     val resize : t -> winsize -> unit
     val window_size : t -> winsize
+    val interrupt : t -> unit
+    val send_eof : t -> unit
   end
 
   type (_, _, _) Resource.pi +=
