@@ -1,0 +1,11 @@
+(executable
+ (name pty_test)
+ (modules pty_test)
+ (libraries eio eio_main eio.unix cstruct))
+
+(mdx
+ (package eio_main)
+ (files run.md)
+ (deps
+  (env_var "EIO_BACKEND")
+  %{exe:pty_test.exe}))
