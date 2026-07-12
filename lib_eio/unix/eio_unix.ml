@@ -12,13 +12,6 @@ let await_readable = Private.await_readable
 let await_writable = Private.await_writable
 let pipe = Private.pipe
 
-type Eio.Exn.Backend.t += Unix_error of Unix.error * string * string
-let () =
-  Eio.Exn.Backend.register_pp (fun f -> function
-      | Unix_error (code, name, arg) -> Fmt.pf f "Unix_error (%s, %S, %S)" (Unix.error_message code) name arg; true
-      | _ -> false
-    )
-
 let sleep d =
   Eio.Time.Mono.sleep (Effect.perform Private.Get_monotonic_clock) d
 

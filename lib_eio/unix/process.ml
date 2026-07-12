@@ -69,6 +69,17 @@ let get_env = function
   | Some e -> e
   | None -> Unix.environment ()
 
+let with_stdio_fds ~sw ?stdin ?stdout ?stderr fn =
+  with_close_list @@ fun to_close ->
+  let stdin_fd  = read_of_fd  ~sw stdin  ~default:Fd.stdin  ~to_close in
+  let stdout_fd = write_of_fd ~sw stdout ~default:Fd.stdout ~to_close in
+  let stderr_fd = write_of_fd ~sw stderr ~default:Fd.stderr ~to_close in
+  fn [
+    0, stdin_fd, `Blocking;
+    1, stdout_fd, `Blocking;
+    2, stderr_fd, `Blocking;
+  ]
+
 let translate_execve_error ~executable f =
   try f () with
   | Unix.Unix_error (Unix.E2BIG, "execve", _) ->
@@ -140,20 +151,20 @@ end) = struct
     (Private.pipe sw :> ([Eio.Resource.close_ty | Eio.Flow.source_ty] r *
     [Eio.Resource.close_ty | Eio.Flow.sink_ty] r))
 
-  let spawn v ~sw ?cwd ?stdin ?stdout ?stderr ?env ?executable args =
+  let open_pty _ ~sw ~size = Pty.open_posix ~sw ~size
+
+  let spawn v ~sw ?cwd ?tty ?stdin ?stdout ?stderr ?env ?executable args =
     let executable = get_executable executable ~args in
     let env = get_env env in
-    with_close_list @@ fun to_close ->
-    let stdin_fd  = read_of_fd  ~sw stdin  ~default:Fd.stdin  ~to_close in
-    let stdout_fd = write_of_fd ~sw stdout ~default:Fd.stdout ~to_close in
-    let stderr_fd = write_of_fd ~sw stderr ~default:Fd.stderr ~to_close in
-    let fds = [
-      0, stdin_fd, `Blocking;
-      1, stdout_fd, `Blocking;
-      2, stderr_fd, `Blocking;
-    ] in
-    translate_execve_error ~executable @@ fun () ->
-    X.spawn_unix v ~sw ?cwd ~env ~fds ~executable args
+    match tty with
+    | Some tty ->
+      (* The terminal is the child's standard streams (and controlling terminal). *)
+      translate_execve_error ~executable @@ fun () ->
+      X.spawn_unix v ~sw ?cwd ~login_tty:(Pty.tty tty) ~env ~fds:[] ~executable args
+    | None ->
+      with_stdio_fds ~sw ?stdin ?stdout ?stderr @@ fun fds ->
+      translate_execve_error ~executable @@ fun () ->
+      X.spawn_unix v ~sw ?cwd ~env ~fds ~executable args
 
   let spawn_unix = X.spawn_unix
 end

@@ -74,10 +74,17 @@ module Pi = struct
       sw:Switch.t ->
       [Flow.source_ty | Resource.close_ty] r * [Flow.sink_ty | Resource.close_ty] r
 
+    val open_pty :
+      t ->
+      sw:Switch.t ->
+      size:Pty.winsize ->
+      Pty.ty r
+
     val spawn :
       t ->
       sw:Switch.t ->
       ?cwd:Fs.dir_ty Path.t ->
+      ?tty:Pty.ty r ->
       ?stdin:Flow.source_ty r ->
       ?stdout:Flow.sink_ty r ->
       ?stderr:Flow.sink_ty r ->
@@ -127,13 +134,17 @@ let signal (type tag) (t : [> tag ty] r) s =
   let module X = (val (Resource.get ops Pi.Process)) in
   X.signal v s
 
-let spawn (type tag) ~sw (t : [> tag mgr_ty] r) ?cwd ?stdin ?stdout ?stderr ?env ?executable args : tag ty r =
+let spawn (type tag) ~sw (t : [> tag mgr_ty] r) ?cwd ?tty ?stdin ?stdout ?stderr ?env ?executable args : tag ty r =
+  if Option.is_some tty &&
+     (Option.is_some stdin || Option.is_some stdout || Option.is_some stderr) then
+    invalid_arg "Process.spawn: ~tty cannot be combined with ~stdin/~stdout/~stderr";
   let (Resource.T (v, ops)) = t in
   let module X = (val (Resource.get ops Pi.Mgr)) in
   X.spawn v ~sw
     ?cwd:(cwd :> Fs.dir_ty Path.t option)
     ?env
     ?executable args
+    ?tty:(tty :> Pty.ty r option)
     ?stdin:(stdin :> Flow.source_ty r option)
     ?stdout:(stdout :> Flow.sink_ty r option)
     ?stderr:(stderr :> Flow.sink_ty r option)
@@ -146,6 +157,10 @@ let run t ?cwd ?stdin ?stdout ?stderr ?(is_success = Int.equal 0) ?env ?executab
   | status ->
     let ex = err (Child_error status) in
     raise (Exn.add_context ex "running command: %a" pp_args args)
+
+let open_pty (type tag) ~sw ((Resource.T (v, ops)) : [> tag mgr_ty] r) ?(size = Pty.default_winsize) () =
+  let module X = (val (Resource.get ops Pi.Mgr)) in
+  X.open_pty v ~sw ~size
 
 let pipe (type tag) ~sw ((Resource.T (v, ops)) : [> tag mgr_ty] r) =
   let module X = (val (Resource.get ops Pi.Mgr)) in

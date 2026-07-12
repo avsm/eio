@@ -79,6 +79,21 @@ val spawn_unix :
     @param login_tty If given, the child starts a new session with this terminal
                      device as its controlling terminal and stdin/stdout/stderr. *)
 
+val with_stdio_fds :
+    sw:Switch.t ->
+    ?stdin:Eio.Flow.source_ty r ->
+    ?stdout:Eio.Flow.sink_ty r ->
+    ?stderr:Eio.Flow.sink_ty r ->
+    ((int * Fd.t * Fork_action.blocking) list -> 'a) ->
+    'a
+(** [with_stdio_fds ~sw fn] runs [fn fds], where [fds] maps the three standard
+    streams to the given flows (defaulting to the parent's own streams).
+
+    Flows that are not backed by file descriptors are connected via pipes,
+    with fibers in [sw] copying the data; such pipes are closed when [fn]
+    returns. This is a helper for implementing {!Eio.Process.Pi.MGR.spawn}
+    on top of an fd-based spawn primitive. *)
+
 val sigchld : Eio.Condition.t
 (** {b If} an Eio backend installs a SIGCHLD handler, the handler will broadcast on this condition.
 

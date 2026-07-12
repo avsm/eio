@@ -23,6 +23,7 @@ end
 module Buf_write = Buf_write
 module Net = Net
 module Process = Process
+module Pty = Pty
 module Domain_manager = Domain_manager
 module Time = Time
 module File = File

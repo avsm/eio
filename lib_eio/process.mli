@@ -79,6 +79,7 @@ val spawn :
   sw:Switch.t ->
   [> 'tag mgr_ty] r ->
   ?cwd:Fs.dir_ty Path.t ->
+  ?tty:_ Pty.t ->
   ?stdin:_ Flow.source ->
   ?stdout:_ Flow.sink ->
   ?stderr:_ Flow.sink ->
@@ -94,6 +95,7 @@ val spawn :
     If you need more control over file descriptors, see {!Eio_unix.Process}.
 
     @param cwd The current working directory of the process (default: same as parent process).
+    @param tty A pseudoterminal to attach the process to. Cannot be combined with [stdin], [stdout] or [stderr].
     @param stdin The flow to attach to the process's standard input (default: same as parent process).
     @param stdout A flow that the process's standard output goes to (default: same as parent process).
     @param stderr A flow that the process's standard error goes to (default: same as parent process).
@@ -149,6 +151,19 @@ val pipe : sw:Switch.t -> _ mgr -> [< Flow.source_ty | Resource.close_ty] r * [<
     The flows can be used by {!spawn} without the need for extra fibers to copy the data.
     This can be used to connect multiple processes together. *)
 
+(** {2 Terminals} *)
+
+val open_pty : sw:Switch.t -> _ mgr -> ?size:Pty.winsize -> unit -> Pty.ty r
+(** [open_pty ~sw mgr ()] allocates a pseudoterminal backed by the OS.
+
+    The result is a bidirectional flow that reads what a child attached with
+    {!spawn}'s [~tty] writes to its terminal, and whose writes appear as
+    the child's terminal input. It is closed when [sw] finishes.
+
+    @param size The initial terminal window size (default 24 rows by 80 columns).
+    @raise Exn.Io with {!Pty.E} [Unsupported] if the platform has no pseudoterminal
+           support, or [(Open_failed _)] if one cannot be created. *)
+
 (** {2 Provider Interface} *)
 module Pi : sig
   module type PROCESS = sig
@@ -176,10 +191,17 @@ module Pi : sig
       sw:Switch.t ->
       [Flow.source_ty | Resource.close_ty] r * [Flow.sink_ty | Resource.close_ty] r
 
+    val open_pty :
+      t ->
+      sw:Switch.t ->
+      size:Pty.winsize ->
+      Pty.ty r
+
     val spawn :
       t ->
       sw:Switch.t ->
       ?cwd:Fs.dir_ty Path.t ->
+      ?tty:Pty.ty r ->
       ?stdin:Flow.source_ty r ->
       ?stdout:Flow.sink_ty r ->
       ?stderr:Flow.sink_ty r ->

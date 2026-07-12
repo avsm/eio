@@ -1,13 +1,10 @@
+(* Pseudoterminal support via the Windows Pseudo Console (ConPTY) API. *)
+
 open Eio.Std
 
 module Fd = Eio_unix.Fd
 
-type winsize = {
-  rows : int;
-  cols : int;
-  xpixel : int;
-  ypixel : int;
-}
+type winsize = Eio.Pty.winsize
 
 (* A pseudoconsole heap object wrapped in a C custom block. *)
 type conpty
@@ -17,71 +14,76 @@ external conpty_resize : conpty -> winsize -> unit = "caml_eio_windows_conpty_re
 external conpty_close : conpty -> unit = "caml_eio_windows_conpty_close"
 external open_pty_pipes : unit -> Unix.file_descr * Unix.file_descr * Unix.file_descr * Unix.file_descr = "caml_eio_windows_open_pty_pipes"
 
-(* Unlike the unix backend, the pty side here are two simplex pipes:
-   one to read the child's output and one to write its input. *)
 type t = {
   hpcon : conpty;              (* custom block wrapping the HPCON *)
-  pty_source : Fd.t;           (* out_read: the child's output *)
-  pty_sink : Fd.t;             (* in_write: the child's input *)
-  tty : Fd.t;                  (* the "tty" identity token *)
+  source : Fd.t;               (* out_read: the child's output *)
+  sink : Fd.t;                 (* in_write: the child's input *)
   name : string;               (* synthetic identifier as pipes are anonymous *)
   mutable size : winsize;      (* last size given to Create/ResizePseudoConsole *)
 }
 
-(* Map a tty token to its pty *)
-let registry_mutex = Mutex.create ()
-let registry : (Fd.t * t) list ref = ref []
+module Impl = struct
+  type nonrec t = t
 
-let register t =
-  Mutex.lock registry_mutex;
-  Fun.protect ~finally:(fun () -> Mutex.unlock registry_mutex)
-    (fun () -> registry := (t.tty, t) :: !registry)
+  let name t = t.name
 
-let unregister t =
-  Mutex.lock registry_mutex;
-  Fun.protect ~finally:(fun () -> Mutex.unlock registry_mutex)
-    (fun () -> registry := List.filter (fun (fd, _) -> not (fd == t.tty)) !registry)
+  let resize t size =
+    conpty_resize t.hpcon size;
+    t.size <- size
 
-let lookup fd =
-  Mutex.lock registry_mutex;
-  Fun.protect ~finally:(fun () -> Mutex.unlock registry_mutex)
-    (fun () -> List.find_map (fun (k, v) -> if k == fd then Some v else None) !registry)
+  let window_size t = t.size
 
-(* Unique per-process pipe-name counter. *)
+  let read_methods = []
+  let single_read t buf = Flow.Pipe_impl.single_read t.source buf
+  let single_write t bufs = Flow.Pipe_impl.single_write t.sink bufs
+  let copy t ~src = Flow.Pipe_impl.copy t.sink ~src
+
+  let tty _ = None
+  let pty _ = None
+end
+
+type (_, _, _) Eio.Resource.pi +=
+  | Conpty : ('t, 't -> conpty, [> Eio.Pty.pty_ty]) Eio.Resource.pi
+
+let handler =
+  Eio.Resource.handler [
+    H (Conpty, (fun t -> t.hpcon));
+    H (Eio_unix.Pty.Pi.Unix_pty, (module Impl));
+    H (Eio.Pty.Pi.Pty, (module Impl));
+    H (Eio.Flow.Pi.Source, (module Impl));
+    H (Eio.Flow.Pi.Sink, (module Impl));
+  ]
+
+let conpty (Eio.Resource.T (v, ops) : _ Eio.Pty.t) =
+  match Eio.Resource.get_opt ops Conpty with
+  | Some f -> f v
+  | None -> Fmt.invalid_arg "spawn: ~tty is not an eio_windows pty"
+
+(* Unique per-process pty-name counter. *)
 let counter = Atomic.make 0
 
-let default_size = { rows = 24; cols = 80; xpixel = 0; ypixel = 0 }
-
-let open_pty ~sw ?(size = default_size) () =
-  (* TODO avsm: is there a better uuid than Unix.getpid() here? *)
-  let name = Printf.sprintf "conpty-%d-%d" (Unix.getpid ()) (Atomic.fetch_and_add counter 1) in
-  let in_read, in_write, out_read, out_write = open_pty_pipes () in
-  let hpcon =
-    try conpty_create size in_read out_write
-    with e ->
-      List.iter (fun fd -> try Unix.close fd with Unix.Unix_error _ -> ())
-        [in_read; in_write; out_read; out_write];
-      raise e
-  in
-  (try Unix.close in_read with Unix.Unix_error _ -> ());
-  let pty_source = Fd.of_unix ~sw ~blocking:true ~seekable:false ~close_unix:true out_read in
-  let pty_sink = Fd.of_unix ~sw ~blocking:true ~seekable:false ~close_unix:true in_write in
-  let tty = Fd.of_unix ~sw ~blocking:true ~seekable:false ~close_unix:true out_write in
-  let t = { hpcon; pty_source; pty_sink; tty; name; size } in
-  register t;
-  Switch.on_release sw (fun () -> unregister t; conpty_close hpcon);
-  t
-
-let pty t = t.pty_source
-let tty t = t.tty
-let name t = t.name
-let hpcon t = t.hpcon
-
-let source t = (Flow.of_pipe_source t.pty_source :> Eio_unix.source_ty r)
-let sink t = (Flow.of_pipe_source t.pty_sink :> Eio_unix.sink_ty r)
-
-let resize t size =
-  conpty_resize t.hpcon size;
-  t.size <- size
-
-let get_window_size t = t.size
+let open_pty ~sw ?(size = Eio.Pty.default_winsize) () =
+  try
+    (* TODO avsm: is there a better uuid than Unix.getpid() here? *)
+    let name = Printf.sprintf "conpty-%d-%d" (Unix.getpid ()) (Atomic.fetch_and_add counter 1) in
+    let in_read, in_write, out_read, out_write = open_pty_pipes () in
+    let hpcon =
+      try conpty_create size in_read out_write
+      with e ->
+        List.iter (fun fd -> try Unix.close fd with Unix.Unix_error _ -> ())
+          [in_read; in_write; out_read; out_write];
+        raise e
+    in
+    (* The pseudoconsole holds its own references to these ends, so close ours;
+       the source then reaches end-of-file once the pseudoconsole is closed. *)
+    List.iter (fun fd -> try Unix.close fd with Unix.Unix_error _ -> ())
+      [in_read; out_write];
+    let source = Fd.of_unix ~sw ~blocking:true ~seekable:false ~close_unix:true out_read in
+    let sink = Fd.of_unix ~sw ~blocking:true ~seekable:false ~close_unix:true in_write in
+    let t = { hpcon; source; sink; name; size } in
+    Switch.on_release sw (fun () -> conpty_close hpcon);
+    (Eio.Resource.T (t, handler) : Eio.Pty.ty r)
+  with
+  | Unix.Unix_error (Unix.EOPNOTSUPP, _, _) -> raise (Eio.Pty.err Eio.Pty.Unsupported)
+  | Unix.Unix_error (code, name, arg) ->
+    raise (Eio.Pty.err (Eio.Pty.Open_failed (Eio_unix.Unix_error (code, name, arg))))

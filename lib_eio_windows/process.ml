@@ -91,41 +91,6 @@ end
 let process_handler = Eio.Process.Pi.process (module Process_impl)
 let process t = Eio.Resource.T (t, process_handler)
 
-(* TODO: these functions are lifted from eio_unix *)
-let with_close_list fn =
-  let to_close = ref [] in
-  let close () = List.iter Fd.close !to_close in
-  match fn to_close with
-  | x -> close (); x
-  | exception ex ->
-    let bt = Printexc.get_raw_backtrace () in
-    close ();
-    Printexc.raise_with_backtrace ex bt
-
-let read_of_fd ~sw ~default ~to_close = function
-  | None -> default
-  | Some f ->
-    match Eio_unix.Resource.fd_opt f with
-    | Some fd -> fd
-    | None ->
-      let r, w = Eio_unix.pipe sw in
-      Fiber.fork ~sw (fun () -> Eio.Flow.copy f w; Eio.Flow.close w);
-      let r = Eio_unix.Resource.fd r in
-      to_close := r :: !to_close;
-      r
-
-let write_of_fd ~sw ~default ~to_close = function
-  | None -> default
-  | Some f ->
-    match Eio_unix.Resource.fd_opt f with
-    | Some fd -> fd
-    | None ->
-      let r, w = Eio_unix.pipe sw in
-      Fiber.fork ~sw (fun () -> Eio.Flow.copy r f; Eio.Flow.close r);
-      let w = Eio_unix.Resource.fd w in
-      to_close := w :: !to_close;
-      w
-
 module Mgr = struct
   type t = unit
   type tag = [ `Generic | `Unix ]
@@ -134,74 +99,62 @@ module Mgr = struct
     (Eio_unix.pipe sw :> ([Eio.Resource.close_ty | Eio.Flow.source_ty] r *
                           [Eio.Resource.close_ty | Eio.Flow.sink_ty] r))
 
-  let spawn_unix () ~sw ?cwd ?pgid ?uid ?gid ?login_tty ~env ~fds ~executable args =
-    (* Windows has no per-fd inheritance table so only the three standard streams *)
-    if pgid <> None || uid <> None || gid <> None then
-      Fmt.invalid_arg "spawn: pgid/uid/gid are not supported on Windows";
-    (* An arbitrary fd cannot be a controlling terminal on Windows. *)
-    let pty =
-      match login_tty with
-      | None -> None
-      | Some fd ->
-        match Pty.lookup fd with
-        | Some pty -> Some pty
-        | None -> Fmt.invalid_arg "spawn: login_tty is not an eio_windows pty"
-    in
-    (match pty with
-     | Some _ when fds <> [] ->
-       Fmt.invalid_arg "spawn: ~fds cannot be combined with a pty login_tty on Windows"
-     | _ ->
-       List.iter (fun (i, _, _) ->
-           if i > 2 then Fmt.invalid_arg "spawn: only fds 0-2 are supported on Windows (got fd %d)" i)
-         fds);
-    let cwd =
-      match cwd with
-      | None -> ""
-      | Some ((dir, p) : Eio.Fs.dir_ty Eio.Path.t) ->
-        begin match Fs.Handler.as_posix_dir dir with
-          | None -> Fmt.invalid_arg "cwd is not an eio_windows directory!"
-          | Some d -> Fs.Dir.strip_nt_prefix (Err.run (Fs.Dir.resolve d) p)
-        end
-    in
-    let cmdline = command_line args in
-    let pid, raw_handle =
-      wrap_spawn_error ~executable ~args @@ fun () ->
-      match pty with
-      | Some pty ->
-        eio_spawn_pty cwd env executable (Pty.hpcon pty) cmdline
-      | None ->
-        let find n = List.find_map (fun (i, fd, _) -> if i = n then Some fd else None) fds in
-        let get n name =
-          match find n with
-          | Some fd -> fd
-          | None -> Fmt.invalid_arg "spawn: no file descriptor for %s (fd %d)" name n
-        in
-        let stdin_fd = get 0 "stdin" and stdout_fd = get 1 "stdout" and stderr_fd = get 2 "stderr" in
-        Fd.use_exn "stdin" stdin_fd @@ fun h0 ->
-        Fd.use_exn "stdout" stdout_fd @@ fun h1 ->
-        Fd.use_exn "stderr" stderr_fd @@ fun h2 ->
-        eio_spawn cwd env executable h0 h1 h2 cmdline
-    in
+  let open_pty () ~sw ~size = Pty.open_pty ~sw ~size ()
+
+  let resolve_cwd = function
+    | None -> ""
+    | Some ((dir, p) : Eio.Fs.dir_ty Eio.Path.t) ->
+      match Fs.Handler.as_posix_dir dir with
+      | None -> Fmt.invalid_arg "cwd is not an eio_windows directory!"
+      | Some d -> Fs.Dir.strip_nt_prefix (Err.run (Fs.Dir.resolve d) p)
+
+  let make_process ~sw (pid, raw_handle) =
     let handle = Fd.of_unix ~sw ~blocking:true ~close_unix:true raw_handle in
     let t = { Process.pid; handle; status = None; lock = Eio.Mutex.create () } in
     Switch.on_release sw (fun () -> Process.stop t);
     process t
 
-  let spawn () ~sw ?cwd ?stdin ?stdout ?stderr ?env ?executable args =
+  let spawn_unix () ~sw ?cwd ?pgid ?uid ?gid ?login_tty ~env ~fds ~executable args =
+    (* Windows has no per-fd inheritance table so only the three standard streams *)
+    if pgid <> None || uid <> None || gid <> None then
+      Fmt.invalid_arg "spawn: pgid/uid/gid are not supported on Windows";
+    (* A Windows pseudoconsole has no terminal-device fd to log in with. *)
+    if login_tty <> None then
+      Fmt.invalid_arg "spawn: ~login_tty is not supported on Windows; use Eio.Process.spawn ~tty";
+    List.iter (fun (i, _, _) ->
+        if i > 2 then Fmt.invalid_arg "spawn: only fds 0-2 are supported on Windows (got fd %d)" i)
+      fds;
+    let cwd = resolve_cwd cwd in
+    let cmdline = command_line args in
+    make_process ~sw @@ wrap_spawn_error ~executable ~args @@ fun () ->
+    let find n = List.find_map (fun (i, fd, _) -> if i = n then Some fd else None) fds in
+    let get n name =
+      match find n with
+      | Some fd -> fd
+      | None -> Fmt.invalid_arg "spawn: no file descriptor for %s (fd %d)" name n
+    in
+    let stdin_fd = get 0 "stdin" and stdout_fd = get 1 "stdout" and stderr_fd = get 2 "stderr" in
+    Fd.use_exn "stdin" stdin_fd @@ fun h0 ->
+    Fd.use_exn "stdout" stdout_fd @@ fun h1 ->
+    Fd.use_exn "stderr" stderr_fd @@ fun h2 ->
+    eio_spawn cwd env executable h0 h1 h2 cmdline
+
+  let spawn () ~sw ?cwd ?tty ?stdin ?stdout ?stderr ?env ?executable args =
     if args = [] && executable = None then
       invalid_arg "Arguments list is empty and no executable provided";
     let env = match env with Some e -> e | None -> Unix.environment () in
     let executable = match executable with Some e -> e | None -> "" in
-    with_close_list @@ fun to_close ->
-    let stdin_fd  = read_of_fd  ~sw stdin  ~default:Fd.stdin  ~to_close in
-    let stdout_fd = write_of_fd ~sw stdout ~default:Fd.stdout ~to_close in
-    let stderr_fd = write_of_fd ~sw stderr ~default:Fd.stderr ~to_close in
-    let fds = [
-      0, stdin_fd, `Blocking;
-      1, stdout_fd, `Blocking;
-      2, stderr_fd, `Blocking;
-    ] in
-    spawn_unix () ~sw ?cwd ~env ~fds ~executable args
+    match tty with
+    | Some t ->
+      (* The pseudoconsole is the child's standard streams. *)
+      let hpcon = Pty.conpty t in
+      let cwd = resolve_cwd cwd in
+      let cmdline = command_line args in
+      make_process ~sw @@ wrap_spawn_error ~executable ~args @@ fun () ->
+      eio_spawn_pty cwd env executable hpcon cmdline
+    | None ->
+      Eio_unix.Process.with_stdio_fds ~sw ?stdin ?stdout ?stderr @@ fun fds ->
+      spawn_unix () ~sw ?cwd ~env ~fds ~executable args
 end
 
 let mgr : Eio_unix.Process.mgr_ty r =

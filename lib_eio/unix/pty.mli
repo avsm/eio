@@ -1,49 +1,24 @@
-(** Pseudoterminal (PTY) support.
-
-    A pseudoterminal is a pair of connected file descriptors emulating a
-    terminal. The {e pseudoterminal device} is used by a controlling program
-    such as a terminal emulator, while the {e terminal device} is used by
-    a child process as its controlling terminal. *)
+(** OS-level access to pseudoterminals *)
 
 open Eio.Std
 
-type t
-(** A connected pseudoterminal pair. *)
-
-val open_pty : sw:Switch.t -> unit -> t
-(** [open_pty ~sw ()] allocates a new pseudoterminal pair.
-
-    Both file descriptors are closed when [sw] finishes. The {!pty} end
-    is non-blocking; the {!tty} end is blocking and so suitable as the
-    child's controlling terminal.
-
-    Not a multi-domain-safe function on some platforms without reentrant
-    [ptsname] support.
-
-    @raise Unix.Unix_error if the pseudoterminal cannot be created. *)
-
-val pty : t -> Fd.t
-(** [pty t] is the pseudoterminal-device end. *)
-
-val tty : t -> Fd.t
-(** [tty t] is the terminal-device end. *)
-
-val name : t -> string
-(** [name t] is the path of the terminal device. *)
-
-val source : t -> Types.source_ty r
-(** [source t] reads the output the child writes to terminal. *)
-
-val sink : t -> Types.sink_ty r
-(** [sink t] writes input for the child to read from its terminal. *)
-
-(** Terminal window dimensions. *)
-type winsize = {
+type winsize = Eio.Pty.winsize = {
   rows : int;     (** Height of the terminal in character rows. *)
   cols : int;     (** Width of the terminal in character columns. *)
   xpixel : int;   (** Width in pixels ([0] if unknown). *)
   ypixel : int;   (** Height in pixels ([0] if unknown). *)
 }
+
+(** {2 File descriptors} *)
+
+val tty : _ Eio.Pty.t -> Fd.t
+(** [tty t] is the terminal-device end, to pass as [~login_tty] when spawning
+    a child with {!Process.spawn_unix}. *)
+
+val pty : _ Eio.Pty.t -> Fd.t
+(** [pty t] is the pseudoterminal-device (controlling) end. *)
+
+(** {2 Window sizes of arbitrary terminals} *)
 
 val get_window_size : Fd.t -> winsize
 (** [get_window_size fd] returns the window size of terminal [fd].
@@ -53,13 +28,16 @@ val get_window_size : Fd.t -> winsize
 val set_window_size : Fd.t -> winsize -> unit
 (** [set_window_size fd ws] sets the window size of terminal [fd].
 
-    Setting it on the {!pty} end updates the terminal and delivers [SIGWINCH] to
-    the foreground process group attached to the terminal.
+    Setting it on the {!pty} end updates the terminal and delivers [SIGWINCH]
+    to the foreground process group attached to the terminal.
 
     @raise Unix.Unix_error if [fd] is not a terminal. *)
 
-(** Terminal attributes control.
+(** {2 Terminal attributes}
+
+    Terminal attributes control.
     These raise [Unix.Unix_error] if [fd] is not a terminal. *)
+
 module Tc : sig
   val getattr : Fd.t -> Unix.terminal_io
   (** [getattr fd] returns the current terminal attributes of [fd].
@@ -92,3 +70,30 @@ module Tc : sig
   (** [flow fd action] suspends or resumes transmission/reception on [fd].
       See {!Unix.tcflow}. *)
 end
+
+(** {2 Provider Interface} *)
+
+module Pi : sig
+  module type UNIX_PTY = sig
+    include Eio.Pty.Pi.FLOW_PTY
+
+    val tty : t -> Fd.t option
+    (** The terminal-device end for attaching children, if the platform has one. *)
+
+    val pty : t -> Fd.t option
+    (** The pseudoterminal-device end, if the platform has a single one. *)
+  end
+
+  type (_, _, _) Eio.Resource.pi +=
+    | Unix_pty : ('t, (module UNIX_PTY with type t = 't), [> Eio.Pty.pty_ty]) Eio.Resource.pi
+
+  val unix_pty : (module UNIX_PTY with type t = 't) -> ('t, Eio.Pty.ty) Eio.Resource.handler
+end
+
+val open_posix : sw:Switch.t -> size:winsize -> Eio.Pty.ty r
+(** [open_posix ~sw ~size] is the POSIX pseudoterminal implementation.
+
+    Both file descriptors are closed when [sw] finishes. The {!pty} end is
+    non-blocking and the {!tty} end is blocking and suitable as the child's
+    controlling terminal. This is not a multi-domain-safe function on some platforms
+    without reentrant [ptsname] support. *)

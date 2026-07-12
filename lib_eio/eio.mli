@@ -181,6 +181,9 @@ module Fs = Fs
 (** Managing child processes. *)
 module Process = Process
 
+(** Pseudoterminals for child processes. *)
+module Pty = Pty
+
 (** {2 Time} *)
 
 (** Clocks, time, sleeping and timeouts. *)

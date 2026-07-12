@@ -95,6 +95,8 @@ let of_fd fd =
   (r : [`Unix_fd | Eio_unix.Net.stream_socket_ty | Eio.File.rw_ty] r :>
      [< `Unix_fd | Eio_unix.Net.stream_socket_ty | Eio.File.rw_ty] r)
 
+(* Like [Impl], but a closed pipe peer reads as end-of-file rather than an
+   error. Used for the pty pipes, whose peer is a pseudoconsole. *)
 module Pipe_impl = struct
   include Impl
 
@@ -105,13 +107,6 @@ module Pipe_impl = struct
     | exception Unix.Unix_error ((EPIPE | ECONNRESET | ECONNABORTED), _, _) -> raise End_of_file
     | exception Unix.Unix_error (code, name, arg) -> raise (Err.wrap code name arg)
 end
-
-let pipe_handler = Eio_unix.Pi.flow_handler (module Pipe_impl)
-
-let of_pipe_source fd =
-  let r = Eio.Resource.T (fd, pipe_handler) in
-  (r : [`Unix_fd | Eio_unix.Net.stream_socket_ty | Eio.File.rw_ty] r :>
-     [< `Unix_fd | Eio_unix.Net.stream_socket_ty | Eio.File.rw_ty] r)
 
 module Secure_random = struct
   type t = unit
