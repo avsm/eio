@@ -267,9 +267,14 @@ Creating directories with nesting, symlinks, etc:
 
 # Split
 
+Splitting is lexical, delegated to the backend's path syntax:
+
 ```ocaml
-let fake_dir : Eio.Fs.dir_ty r = Eio.Resource.T ((), Eio.Resource.handler [])
-let split path = Eio.Path.split (fake_dir, path) |> Option.map (fun ((_, dirname), basename) -> dirname, basename)
+let split path =
+  Eio_main.run @@ fun env ->
+  let (dir, _) = Eio.Stdenv.fs env in
+  Eio.Path.split (dir, path)
+  |> Option.map (fun ((_, dirname), basename) -> dirname, basename)
 ```
 
 ```ocaml

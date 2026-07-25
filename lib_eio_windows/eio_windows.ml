@@ -15,6 +15,7 @@
  *)
 
 module Low_level = Low_level
+module Path_syntax = Path_syntax
 
 type stdenv = Eio_unix.Stdenv.base
 

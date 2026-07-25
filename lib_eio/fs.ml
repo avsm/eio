@@ -75,7 +75,22 @@ module Pi = struct
     val chmod : t -> follow:bool -> perm:File.Unix_perm.t -> path -> unit
     val chown : follow:bool -> ?uid:int64 -> ?gid:int64 -> t -> path -> unit
     val pp : t Fmt.t
+
+    (* Path syntax. TODO avsm should these be in a different module type to DIR? *)
+
     val native : t -> string -> string option
+    (** [native t p] is the OS-native path for [p] within [t], if available. *)
+
+    val is_step : t -> string -> bool
+    (** [is_step t s] is [true] if [s] extends a path when joined by {!Path.( / )},
+        and [false] if it would replace it (e.g. an absolute path). *)
+
+    val split : t -> path -> (path * string) option
+    (** [split t p] is [p]'s directory part and its final component,
+        ignoring trailing separators, or [None] if there is nothing to split. *)
+
+    val join : t -> path -> string -> path
+    (** [join t dir step] is [dir] with [step] appended, using [t]'s syntax. *)
   end
 
   type (_, _, _) Resource.pi +=

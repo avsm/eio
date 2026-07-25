@@ -145,6 +145,9 @@ module Private : sig
 
   module Thread_pool = Thread_pool
 
+  module Path_syntax = Path_syntax
+  (** POSIX path syntax, for backends implementing {!Eio.Fs.Pi.DIR}. *)
+
   val read_link : Fd.t option -> string -> string
   val read_link_unix : Unix.file_descr option -> string -> string
   val chmod : Fd.t -> string -> flags:int -> mode:int -> unit

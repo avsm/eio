@@ -19,6 +19,7 @@ let pipe sw =
 module Rcfd = Rcfd
 module Fork_action = Fork_action
 module Thread_pool = Thread_pool
+module Path_syntax = Path_syntax
 
 external eio_readlinkat : Unix.file_descr -> string -> Cstruct.t -> int = "eio_unix_readlinkat"
 

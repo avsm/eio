@@ -36,7 +36,8 @@ type 'a t = 'a Fs.dir * path
 
 val ( / ) : 'a t -> string -> 'a t
 (** [t / step] is [t] with [step] appended to [t]'s path,
-    or replacing [t]'s path if [step] is absolute:
+    or replacing [t]'s path if [step] stands alone
+    (for example, if it is absolute):
 
     - [(fd, "foo") / "bar" = (fd, "foo/bar")]
     - [(fd, "foo") / "/bar" = (fd, "/bar")] *)
@@ -62,14 +63,14 @@ val native_exn : _ t -> string
 (** Like {!native}, but raise a suitable exception if the path is not a native path. *)
 
 val split : 'a t -> ('a t * string) option
-(** [split t] returns [Some (dir, basename)], where [basename] is the last path component in [t]
-    and [dir] is [t] without [basename].
+(** [split t] returns [Some (dir, basename)], where [basename] is the last path component
+    in [t] and [dir] is [t] without [basename].
 
-    [dir / basename] refers to the same path as [t].
+    [dir / basename] always refers to the same path as [t].
 
     [split t = None] if there is nothing to split.
 
-    For example:
+    Examples:
 
     - [split (root, "foo/bar") = Some ((root, "foo"), "bar")]
     - [split (root, "/foo/bar") = Some ((root, "/foo"), "bar")]

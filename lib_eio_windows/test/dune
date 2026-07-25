@@ -2,4 +2,4 @@
   (name test)
   (package eio_windows)
   (build_if (= %{os_type} "Win32"))
-  (libraries alcotest kcas eio.mock eio_windows))
+  (libraries alcotest kcas eio.mock eio.unix eio_windows))

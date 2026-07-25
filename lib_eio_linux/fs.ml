@@ -171,6 +171,10 @@ end = struct
 
   let native t path =
     Some (native_internal t path)
+
+  let is_step _t s = Eio_unix.Private.Path_syntax.is_step s
+  let split _t p = Eio_unix.Private.Path_syntax.split p
+  let join _t p1 p2 = Eio_unix.Private.Path_syntax.join p1 p2
 end
 and Dir_handler : sig
   val v : (Dir.t, [`Dir | `Close]) Eio.Resource.handler
