@@ -52,6 +52,10 @@ type 'a dir = ([> dir_ty] as 'a) r
 module Pi = struct
 
   module type PATH = sig
+    val is_step : string -> bool
+    (** [is_step s] is [true] if [s] extends a path when joined by {!Path.( / )},
+        and [false] if it would replace it (e.g. an absolute path). *)
+
     val split : path -> (path * string) option
     (** The implementation of {!Path.split}. *)
 
@@ -84,7 +88,9 @@ module Pi = struct
     val chmod : t -> follow:bool -> perm:File.Unix_perm.t -> path -> unit
     val chown : follow:bool -> ?uid:int64 -> ?gid:int64 -> t -> path -> unit
     val pp : t Fmt.t
+
     val native : t -> string -> string option
+    (** [native t p] is the OS-native path for [p] within [t], if available. *)
 
     include PATH
   end

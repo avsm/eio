@@ -1,7 +1,7 @@
+(* POSIX path syntax *)
+
 (* Like [Filename.is_relative] but always using "/" as the separator. *)
-let is_relative = function
-  | "" -> true
-  | x -> x.[0] <> '/'
+let is_step s = not (String.starts_with ~prefix:"/" s)
 
 (* Like [Filename.concat] but always using "/" as the separator. *)
 let concat a b =
@@ -12,7 +12,7 @@ let concat a b =
 let join p1 p2 =
   match p1, p2 with
   | p1, "" -> concat p1 p2
-  | _, p2 when not (is_relative p2) -> p2
+  | _, p2 when not (is_step p2) -> p2
   | ".", p2 -> p2
   | p1, p2 -> concat p1 p2
 

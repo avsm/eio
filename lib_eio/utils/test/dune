@@ -1,0 +1,4 @@
+(test
+ (name test_paths)
+ (package eio)
+ (libraries alcotest eio.utils))
