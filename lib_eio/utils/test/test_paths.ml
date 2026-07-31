@@ -21,7 +21,9 @@ module Posix = struct
     check_str "join" (P.join "a" "b") "a/b";
     check_str "join root" (P.join "/" "a") "/a";
     check_str "join empty" (P.join "" "b") "b";
-    check_str "join trailing" (P.join "a/" "b") "a/b"
+    check_str "join trailing" (P.join "a/" "b") "a/b";
+    (* An absolute second argument replaces the directory part. *)
+    check_str "join replaces absolute" (P.join "a" "/b") "/b"
 
   let test_split () =
     check_split "split" (P.split "/a//b/") (Some ("/a", "b"));
@@ -99,7 +101,18 @@ module Windows = struct
     check_str "unc root" (W.join "\\\\srv\\share\\" "x") "\\\\srv\\share\\x";
     check_str "verbatim" (W.join "\\\\?\\C:\\a" "b") "\\\\?\\C:\\a\\b";
     check_str "verbatim root" (W.join "\\\\?\\C:\\" "b") "\\\\?\\C:\\b";
-    check_str "nt" (W.join "\\??\\C:\\a" "b") "\\??\\C:\\a\\b"
+    check_str "nt" (W.join "\\??\\C:\\a" "b") "\\??\\C:\\a\\b";
+    (* "abs" above covers a drive-absolute second argument; every other form
+       that names its own volume or root replaces the directory part too. *)
+    check_str "replaces drive fwd" (W.join "a" "C:/b") "C:/b";
+    check_str "replaces drive relative" (W.join "a" "C:b") "C:b";
+    check_str "replaces bare drive" (W.join "a" "C:") "C:";
+    check_str "replaces rooted" (W.join "a" "\\b") "\\b";
+    check_str "replaces posix rooted" (W.join "a" "/b") "/b";
+    check_str "replaces unc" (W.join "a" "\\\\srv\\share") "\\\\srv\\share";
+    check_str "replaces verbatim" (W.join "a" "\\\\?\\C:\\b") "\\\\?\\C:\\b";
+    check_str "replaces nt" (W.join "a" "\\??\\C:\\b") "\\??\\C:\\b";
+    check_str "replaces device" (W.join "a" "\\\\.\\NUL") "\\\\.\\NUL"
 
   (* [join dir base] of a split must refer to the same path as the input.
      For canonical inputs the string is identical; forward-slash-separated
