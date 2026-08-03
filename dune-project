@@ -24,7 +24,6 @@
   (hmap (>= 0.8.1))
   (domain-local-await (>= 0.1.0))
   (crowbar (and (>= 0.2) :with-test))
-  (alcotest (and (>= 1.7.0) :with-test))
   (mtime (>= 2.0.0))
   (mdx (and (>= 2.4.1) :with-test))
   (lintcstubs-arity :with-test)

@@ -52,10 +52,6 @@ type 'a dir = ([> dir_ty] as 'a) r
 module Pi = struct
 
   module type PATH = sig
-    val is_step : string -> bool
-    (** [is_step s] is [true] if [s] extends a path when joined by {!Path.( / )},
-        and [false] if it would replace it (e.g. an absolute path). *)
-
     val split : path -> (path * string) option
     (** The implementation of {!Path.split}. *)
 

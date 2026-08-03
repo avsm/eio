@@ -311,6 +311,48 @@ let split = Eio_utils.Posix_path.split
 - : (string * string) option = None
 ```
 
+# Join
+
+```ocaml
+let join = Eio_utils.Posix_path.join
+```
+
+`join` puts a "/" between the two parts, unless the first already ends with one:
+
+```ocaml
+# join "a" "b";;
+- : string = "a/b"
+
+# join "a" "b/c";;
+- : string = "a/b/c"
+
+# join "a/" "b";;
+- : string = "a/b"
+
+# join "a" "";;
+- : string = "a/"
+
+# join "" "b";;
+- : string = "b"
+
+# join "." "b";;
+- : string = "b"
+
+# join "/" "a";;
+- : string = "/a"
+```
+
+An absolute path replaces the directory rather than extending it.
+A drive letter isn't special here; see `nt_path.md` for the Windows syntax:
+
+```ocaml
+# join "a" "/b";;
+- : string = "/b"
+
+# join "a" "C:\\b";;
+- : string = "a/C:\\b"
+```
+
 # Mkdirs
 
 Recursively creating directories with `mkdirs`.

@@ -60,8 +60,11 @@ let volume s = String.sub s 0 (volume_end s)
 let verbatim_prefix = bslash *> (bslash <|> qmark) *> qmark
 let verbatim s = Option.is_some (verbatim_prefix s 0)
 
-(* A step is anything that doesn't begin with a volume or a separator. *)
-let is_step s = Option.is_none ((volume_prefix <|> sep) s 0)
+(* [is_rooted p] is [true] if [p] begins with a volume or a separator, so that
+   joining it to a directory discards the directory. This includes the
+   drive-relative "C:x", which is not absolute but is still resolved against the
+   drive rather than against the current directory. *)
+let is_rooted s = Option.is_some ((volume_prefix <|> sep) s 0)
 
 let split p =
   let vend = volume_end p in
@@ -94,6 +97,6 @@ let concat a b =
 let join p1 p2 =
   match p1, p2 with
   | p1, "" -> concat p1 p2
-  | _, p2 when not (is_step p2) -> p2
+  | _, p2 when is_rooted p2 -> p2
   | ".", p2 -> p2
   | p1, p2 -> concat p1 p2

@@ -1,7 +1,9 @@
 (* POSIX path syntax *)
 
-(* Like [Filename.is_relative] but always using "/" as the separator. *)
-let is_step s = not (String.starts_with ~prefix:"/" s)
+(* [is_rooted p] is [true] if [p] names its own root, so that joining it to a
+   directory discards the directory. Like [not (Filename.is_relative p)], but
+   always using "/" as the separator. *)
+let is_rooted s = String.starts_with ~prefix:"/" s
 
 (* Like [Filename.concat] but always using "/" as the separator. *)
 let concat a b =
@@ -12,7 +14,7 @@ let concat a b =
 let join p1 p2 =
   match p1, p2 with
   | p1, "" -> concat p1 p2
-  | _, p2 when not (is_step p2) -> p2
+  | _, p2 when is_rooted p2 -> p2
   | ".", p2 -> p2
   | p1, p2 -> concat p1 p2
 

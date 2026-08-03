@@ -66,34 +66,15 @@ let test_create_and_read env () =
   Path.save ~create:(`Exclusive 0o666) path data;
   Alcotest.(check string) "same data" data (Path.load path)
 
-(* An absolute Windows path replaces the directory part, as "/" does. *)
-let test_absolute_join env () =
+(* Check that paths use the Windows syntax, which is tested in tests/nt_path.md. *)
+let test_path_syntax env () =
   let fs = Eio.Stdenv.fs env in
-  let check p expected =
-    let (_, got) = fs / "sub" / p in
-    Alcotest.(check string) p expected got
-  in
-  check "C:\\foo" "C:\\foo";
-  check "C:/foo" "C:/foo";
-  check "C:foo" "C:foo";   (* drive-relative also replaces *)
-  check "\\foo" "\\foo";
-  check "\\\\server\\share" "\\\\server\\share";
-  check "/foo" "/foo";
-  check "rel" "sub\\rel"
-
-(* Splitting a path and re-joining with (/) refers to the same location. *)
-let test_split_join env () =
-  let fs = Eio.Stdenv.fs env in
-  let check p expected =
-    match Path.split (fs / p) with
-    | None -> Alcotest.failf "%s: no split" p
-    | Some (dir, base) -> Alcotest.(check string) p expected (snd (dir / base))
-  in
-  check "C:\\a\\b" "C:\\a\\b";
-  check "C:\\b" "C:\\b";
-  check "C:x" "C:x";              (* drive-relative: no separator added *)
-  check "\\\\srv\\share\\x" "\\\\srv\\share\\x";
-  check "\\\\?\\C:\\a\\b" "\\\\?\\C:\\a\\b"   (* verbatim: keeps "\\" *)
+  Alcotest.(check string) "join" "sub\\rel" (snd (fs / "sub" / "rel"));
+  Alcotest.(check string) "join absolute" "C:\\foo" (snd (fs / "sub" / "C:\\foo"));
+  match Path.split (fs / "C:\\a\\b") with
+  | None -> Alcotest.fail "no split"
+  | Some ((_, dir), base) ->
+    Alcotest.(check (pair string string)) "split" ("C:\\a", "b") (dir, base)
 
 let test_native env () =
   let cwd = Eio.Stdenv.cwd env in
@@ -315,8 +296,7 @@ let test_remove_dir env () =
 
 let tests env = [
   "create-write-read", `Quick, test_create_and_read env;
-  "absolute-join", `Quick, test_absolute_join env;
-  "split-join", `Quick, test_split_join env;
+  "path-syntax", `Quick, test_path_syntax env;
   "native", `Quick, test_native env;
   "cwd-abs-path", `Quick, test_cwd_no_access_abs env;
   "create-exclusive", `Quick, test_exclusive env;
