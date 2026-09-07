@@ -61,9 +61,10 @@ let get_executable ~args = function
     match args with
     | [] -> invalid_arg "Arguments list is empty and no executable given!"
     | (x :: _) ->
-      match resolve_program x with
-      | Some x -> x
-      | None -> raise (Eio.Process.err (Executable_not_found x))
+      if Sys.win32 then x (* the OS resolves the head of the command line itself *)
+      else match resolve_program x with
+        | Some x -> x
+        | None -> raise (Eio.Process.err (Executable_not_found x))
 
 let get_env = function
   | Some e -> e

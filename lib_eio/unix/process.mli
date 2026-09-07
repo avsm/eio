@@ -76,6 +76,11 @@ val spawn_unix :
     except that it takes a list of FD mappings for {!Private.Fork_action.inherit_fds}
     directly, rather than just flows for the standard streams.
 
+    On Windows, [executable] forms the head of the command line, so it becomes
+    the child's argv[0] and CreateProcess resolves it with its own search
+    (application directory, current directory, system directories, then PATH,
+    trying ".exe" for an extensionless name).
+
     @param login_tty If given, the child starts a new session with this terminal
                      device as its controlling terminal and stdin/stdout/stderr.
 

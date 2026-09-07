@@ -315,6 +315,21 @@ let await_timeout t (k : unit Suspended.t) time =
       );
     next t
 
+let await_thread t (k : _ Suspended.t) fn =
+  match Fiber_context.get_error k.fiber with
+  | Some e -> Suspended.discontinue k e
+  | None ->
+    let resumed = Atomic.make false in
+    Fiber_context.set_cancel_fn k.fiber (fun ex ->
+        if not (Atomic.exchange resumed true) then enqueue_failed_thread t k ex
+      );
+    Eio_unix.Private.Thread_pool.submit t.thread_pool ~ctx:k.fiber
+      ~enqueue:(fun r ->
+          if not (Atomic.exchange resumed true) then get_enqueue t k (Result.map_error fst r)
+        )
+      fn;
+    next t
+
 let with_op t fn x =
   t.active_ops <- t.active_ops + 1;
   match fn x with

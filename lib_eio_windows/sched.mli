@@ -38,6 +38,10 @@ val await_timeout : t -> unit Eio_utils.Suspended.t -> Mtime.t -> exit
 
     When [time] is reached, [k] is resumed. Cancelling [k] removes the entry from the timer. *)
 
+val await_thread : t -> 'a Eio_utils.Suspended.t -> (unit -> 'a) -> exit
+(** [await_thread t k fn] runs [fn] in a pool thread and resumes [k] with its result.
+    Cancelling [k] only stops it being resumed: [fn] still runs to completion. *)
+
 val enter : (t -> 'a Eio_utils.Suspended.t -> exit) -> 'a
 (** [enter fn] suspends the current fiber and runs [fn t k] in the scheduler's context.
 
