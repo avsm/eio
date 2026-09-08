@@ -213,6 +213,9 @@ CAMLprim value caml_eio_windows_unlinkat(value v_dirfd, value v_pathname, value 
   wchar_t *pathname;
   UNICODE_STRING relative;
   NTSTATUS r;
+  BY_HANDLE_FILE_INFORMATION info;
+  FILE_DISPOSITION_INFO disposition = { TRUE };
+  int err = 0;
 
   // Not sure what the overhead of this is, but it allows us to have low-level control
   // over file creation. In particular, we can specify the HANDLE to the parent directory
@@ -241,14 +244,14 @@ CAMLprim value caml_eio_windows_unlinkat(value v_dirfd, value v_pathname, value 
   // Create the file
   r = NtCreatefile(
     &h,
-    (SYNCHRONIZE | DELETE),
+    (SYNCHRONIZE | DELETE | FILE_READ_ATTRIBUTES),
     &obj_attr,
     &io_status,
     0, // Allocation size
     FILE_ATTRIBUTE_NORMAL, // TODO: Could check flags to see if we can do READONLY here a la OCaml
     (FILE_SHARE_DELETE),
     FILE_OPEN,
-    ((Bool_val(v_dir) ? FILE_DIRECTORY_FILE : FILE_NON_DIRECTORY_FILE) | FILE_SYNCHRONOUS_IO_NONALERT | FILE_DELETE_ON_CLOSE | FILE_OPEN_REPARSE_POINT),
+    (FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT),
     NULL, // Extended attribute buffer
     0     // Extended attribute buffer length
   );
@@ -261,8 +264,23 @@ CAMLprim value caml_eio_windows_unlinkat(value v_dirfd, value v_pathname, value 
     uerror("unlinkat", v_pathname);
   }
 
-  // Now close the file to delete it
+  // unlink takes anything but a real directory; rmdir takes any directory, links included
+  if (!GetFileInformationByHandle(h, &info)) {
+    caml_win32_maperr(GetLastError());
+    err = errno;
+  } else {
+    int is_dir = info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY;
+    int is_link = info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT;
+    if (Bool_val(v_dir) ? !is_dir : (is_dir && !is_link))
+      err = Bool_val(v_dir) ? ENOTDIR : EISDIR;
+    else if (!SetFileInformationByHandle(h, FileDispositionInfo, &disposition, sizeof disposition)) {
+      caml_win32_maperr(GetLastError());
+      err = errno;
+    }
+  }
   CloseHandle(h);
+  if (err)
+    caml_unix_error(err, "unlinkat", v_pathname);
 
   CAMLreturn(Val_unit);
 }
