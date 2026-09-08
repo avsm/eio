@@ -599,6 +599,28 @@ let test_unlink_symlink env () =
   Path.unlink (cwd / "us-dangling");
   Alcotest.(check bool) "dangling link removed" false (Sys.file_exists "us-dangling")
 
+let test_unlink_dir_symlink env () =
+  with_symlinks @@ fun () ->
+  let cwd = Eio.Stdenv.cwd env in
+  with_cleanup ["ud-dirlink"; "ud-tree\\link"; "ud-tree"; "ud-dir\\inside"; "ud-dir"] @@ fun () ->
+  try_mkdir (cwd / "ud-dir");
+  write_file "ud-dir\\inside" "i";
+  Path.symlink ~link_to:"ud-dir" (cwd / "ud-dirlink");
+  Path.unlink (cwd / "ud-dirlink");
+  Alcotest.(check bool) "directory link removed" false (Sys.file_exists "ud-dirlink");
+  Alcotest.(check string) "directory kept" "i" (read_file "ud-dir\\inside");
+  (match Path.unlink (cwd / "ud-dir") with
+   | () -> Alcotest.fail "Expected EISDIR"
+   | exception Eio.Io (Eio.Exn.X (Eio_unix.Unix_error (Unix.EISDIR, _, _)), _) -> ());
+  (match Path.rmdir (cwd / "ud-dir" / "inside") with
+   | () -> Alcotest.fail "Expected ENOTDIR"
+   | exception Eio.Io (Eio.Exn.X (Eio_unix.Unix_error (Unix.ENOTDIR, _, _)), _) -> ());
+  try_mkdir (cwd / "ud-tree");
+  Path.symlink ~link_to:"..\\ud-dir" (cwd / "ud-tree" / "link");
+  Path.rmtree (cwd / "ud-tree");
+  Alcotest.(check bool) "tree removed" false (Sys.file_exists "ud-tree");
+  Alcotest.(check string) "linked directory kept" "i" (read_file "ud-dir\\inside")
+
 let tests env = [
   "create-write-read", `Quick, test_create_and_read env;
   "absolute-join", `Quick, test_absolute_join env;
@@ -636,4 +658,5 @@ let tests env = [
   "symlink-create", `Quick, test_symlink_create env;
   "symlink-linked-parent", `Quick, test_symlink_linked_parent env;
   "unlink-symlink", `Quick, test_unlink_symlink env;
+  "unlink-directory-symlink", `Quick, test_unlink_dir_symlink env;
 ]
