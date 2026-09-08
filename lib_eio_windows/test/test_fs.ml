@@ -580,6 +580,25 @@ let test_symlink_linked_parent env () =
   Path.symlink ~link_to:"..\\target" (cwd / "sp-alias" / "link");
   Alcotest.(check (list string)) "link is a directory link" ["inside"] (Path.read_dir (cwd / "sp-alias" / "link"))
 
+let test_unlink_symlink env () =
+  with_symlinks @@ fun () ->
+  let cwd = Eio.Stdenv.cwd env in
+  with_cleanup ["us-link"; "us-dirlink"; "us-dangling"; "us-dir\\inside"; "us-dir"; "us-target"] @@ fun () ->
+  write_file "us-target" "t";
+  Path.symlink ~link_to:"us-target" (cwd / "us-link");
+  Path.unlink (cwd / "us-link");
+  Alcotest.(check bool) "link removed" false (Sys.file_exists "us-link");
+  Alcotest.(check string) "target kept" "t" (read_file "us-target");
+  try_mkdir (cwd / "us-dir");
+  write_file "us-dir\\inside" "i";
+  Path.symlink ~link_to:"us-dir" (cwd / "us-dirlink");
+  Path.rmdir (cwd / "us-dirlink");
+  Alcotest.(check bool) "directory link removed" false (Sys.file_exists "us-dirlink");
+  Alcotest.(check string) "directory kept" "i" (read_file "us-dir\\inside");
+  Path.symlink ~link_to:"us-missing" (cwd / "us-dangling");
+  Path.unlink (cwd / "us-dangling");
+  Alcotest.(check bool) "dangling link removed" false (Sys.file_exists "us-dangling")
+
 let tests env = [
   "create-write-read", `Quick, test_create_and_read env;
   "absolute-join", `Quick, test_absolute_join env;
@@ -616,4 +635,5 @@ let tests env = [
   "rename-over-directory", `Quick, test_rename_over_dir env;
   "symlink-create", `Quick, test_symlink_create env;
   "symlink-linked-parent", `Quick, test_symlink_linked_parent env;
+  "unlink-symlink", `Quick, test_unlink_symlink env;
 ]
