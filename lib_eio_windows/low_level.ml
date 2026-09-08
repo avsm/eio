@@ -115,12 +115,13 @@ let getrandom { Cstruct.buffer; off; len } =
 
 external eio_symlink_size : Unix.file_descr -> int option = "caml_eio_windows_symlink_size"
 
-let fstat fd =
-  Fd.use_exn "fstat" fd @@ fun fd ->
+let fstat_unix fd =
   let st = Unix.LargeFile.fstat fd in
   match eio_symlink_size fd with
   | None -> st
   | Some size -> { st with st_kind = S_LNK; st_size = Int64.of_int size }
+
+let fstat fd = Fd.use_exn "fstat" fd fstat_unix
 
 let lstat path =
   in_worker_thread @@ fun () ->
@@ -245,6 +246,13 @@ let openat ?dirfd ?(follow=Follow) ~sw path flags dis create =
   let path = nt_path dirfd path in
   in_worker_thread ~label:"openat" (fun () -> eio_openat dirfd follow path Flags.Open.(flags + cloexec (* + nonblock *)) dis create)
   |> Fd.of_unix ~sw ~blocking:false ~close_unix:true
+
+let stat ?dirfd ?(follow=Follow) path =
+  with_dirfd "stat" dirfd @@ fun dirfd ->
+  let path = nt_path dirfd path in
+  in_worker_thread ~label:"stat" @@ fun () ->
+  let fd = eio_openat dirfd follow path Flags.Open.synchronise Flags.Disposition.open_ Flags.Create.empty in
+  Fun.protect ~finally:(fun () -> Unix.close fd) (fun () -> fstat_unix fd)
 
 let mkdir ?dirfd ?(follow=Follow) ~mode:_ path =
   Switch.run @@ fun sw ->

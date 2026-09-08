@@ -44,6 +44,9 @@ type follow = Follow | Nofollow | Open_link
 val fstat : fd -> Unix.LargeFile.stats
 val lstat : string -> Unix.LargeFile.stats
 
+val stat : ?dirfd:fd -> ?follow:follow -> string -> Unix.LargeFile.stats
+(** [stat ?dirfd ?follow path] is [fstat] of [path], opened as by [openat]. *)
+
 val realpath : string -> string
 val read_link : ?dirfd:fd -> string -> string
 val chown : ?dirfd:fd -> follow:bool -> ?uid:int64 -> ?gid:int64 -> string -> unit

@@ -139,21 +139,14 @@ end = struct
     Err.run (Low_level.unlink ?dirfd ~dir:true) path
 
   let stat t ~follow path =
-    Switch.run @@ fun sw ->
-    let open Low_level in
-    let flags = Low_level.Flags.Open.(generic_read + synchronise) in
-    let dis = Flags.Disposition.open_ in
-    let create = Flags.Create.empty in
     let leaf = Nt_path.basename path in
-    let fd =
-      (* "." and ".." are never symlinks, and [with_parent_dir] rejects ".." *)
-      if follow || leaf = "." || leaf = ".." then
-        Err.run (openat ~sw (resolve t path) flags dis) create
-      else
-        with_parent_dir t path @@ fun dirfd path ->
-        Err.run (openat ?dirfd ~follow:Open_link ~sw path flags dis) create
-    in
-    Flow.Impl.stat fd
+    Flow.eio_of_stat @@
+    (* "." and ".." are never symlinks, and [with_parent_dir] rejects ".." *)
+    if follow || leaf = "." || leaf = ".." then
+      Err.run Low_level.stat (resolve t path)
+    else
+      with_parent_dir t path @@ fun dirfd path ->
+      Err.run (Low_level.stat ?dirfd ~follow:Open_link) path
 
   let read_dir t path =
     (* todo: need fdopendir here to avoid races *)
