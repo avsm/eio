@@ -543,6 +543,43 @@ let test_rename_over_dir env () =
     Alcotest.(check string) "non-empty directory kept" "y" (read_file "rn-full\\inside");
     Alcotest.(check string) "source kept" "x" (read_file "rn-empty\\inside")
 
+let test_symlink_create env () =
+  with_symlinks @@ fun () ->
+  let cwd = Eio.Stdenv.cwd env in
+  let fs = Eio.Stdenv.fs env in
+  with_cleanup ["sc-link"; "sc-dirlink"; "sc-abslink"; "sc-dir\\up"; "sc-dir\\inside"; "sc-dir"; "sc-target"; "..\\sc-escaped"] @@ fun () ->
+  write_file "sc-target" "t";
+  Path.symlink ~link_to:"sc-target" (cwd / "sc-link");
+  Alcotest.(check string) "stored target" "sc-target" (Unix.readlink "sc-link");
+  Alcotest.(check string) "read through link" "t" (Path.load (cwd / "sc-link"));
+  try_mkdir (cwd / "sc-dir");
+  write_file "sc-dir\\inside" "i";
+  Path.symlink ~link_to:"sc-dir" (cwd / "sc-dirlink");
+  Alcotest.(check string) "read through directory link" "i" (Path.load (cwd / "sc-dirlink" / "inside"));
+  Path.symlink ~link_to:"..\\sc-target" (cwd / "sc-dir" / "up");
+  Alcotest.(check string) "read through parent link" "t" (Path.load (cwd / "sc-dir" / "up"));
+  let abs = Filename.concat (Sys.getcwd ()) in
+  Path.symlink ~link_to:(abs "sc-target") (fs / abs "sc-abslink");
+  Alcotest.(check string) "read through absolute link" "t" (Path.load (fs / "sc-abslink"));
+  (match Path.symlink ~link_to:"sc-target" (cwd / "sc-link") with
+   | () -> Alcotest.fail "Expected Already_exists"
+   | exception Eio.Io (Eio.Fs.E (Already_exists _), _) -> ());
+  match Path.symlink ~link_to:"sc-target" (cwd / "..\\sc-escaped") with
+  | () -> Alcotest.fail "Expected permission denied"
+  | exception Eio.Io (Eio.Fs.E (Permission_denied _), _) -> ()
+
+let test_symlink_linked_parent env () =
+  with_symlinks @@ fun () ->
+  let cwd = Eio.Stdenv.cwd env in
+  with_cleanup ["sp-alias\\link"; "sp-alias"; "sp-tree\\target\\inside"; "sp-tree\\target"; "sp-tree\\inner"; "sp-tree"] @@ fun () ->
+  try_mkdir (cwd / "sp-tree");
+  try_mkdir (cwd / "sp-tree" / "inner");
+  try_mkdir (cwd / "sp-tree" / "target");
+  write_file "sp-tree\\target\\inside" "i";
+  Path.symlink ~link_to:"sp-tree\\inner" (cwd / "sp-alias");
+  Path.symlink ~link_to:"..\\target" (cwd / "sp-alias" / "link");
+  Alcotest.(check (list string)) "link is a directory link" ["inside"] (Path.read_dir (cwd / "sp-alias" / "link"))
+
 let tests env = [
   "create-write-read", `Quick, test_create_and_read env;
   "absolute-join", `Quick, test_absolute_join env;
@@ -577,4 +614,6 @@ let tests env = [
   "stat-symlink", `Quick, test_stat_symlink env;
   "rename", `Quick, test_rename env;
   "rename-over-directory", `Quick, test_rename_over_dir env;
+  "symlink-create", `Quick, test_symlink_create env;
+  "symlink-linked-parent", `Quick, test_symlink_linked_parent env;
 ]
