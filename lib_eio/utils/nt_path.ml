@@ -115,6 +115,8 @@ let join p1 p2 =
   | ".", p2 -> p2
   | p1, p2 -> concat p1 p2
 
+let ( / ) = join
+
 let normalise rest =
   let rec go acc = function
     | [] -> List.rev acc
@@ -133,10 +135,11 @@ let qualify p =
   | None, Some share -> "UNC\\" ^ share      (* \\server\share *)
   | None, None -> p                          (* C:\... *)
 
+let backslashes = String.map (fun c -> if c = '/' then '\\' else c)
+
 let to_nt ~cwd p =
   if verbatim p then qualify p
   else (
-    let backslashes = String.map (fun c -> if c = '/' then '\\' else c) in
     let vol, rest = split_volume (backslashes p) in
     let cwd_vol, cwd_rest = split_volume (backslashes cwd) in
     let rooted = rest <> "" && rest.[0] = '\\' in
@@ -149,3 +152,6 @@ let to_nt ~cwd p =
     in
     qualify (vol ^ normalise (base ^ "\\" ^ rest))
   )
+
+let link_target ~cwd p =
+  if is_relative p then backslashes p else to_nt ~cwd p

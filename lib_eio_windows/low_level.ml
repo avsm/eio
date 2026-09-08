@@ -277,12 +277,14 @@ let rename ?old_dir old_path ?new_dir new_path =
   eio_renameat old_dir old_path new_dir new_path
 
 
-external eio_symlinkat : string -> Unix.file_descr option -> string -> unit = "caml_eio_windows_symlinkat"
+external eio_symlinkat : string -> string -> Unix.file_descr option -> string -> bool -> unit = "caml_eio_windows_symlinkat"
 
-let symlink ~link_to new_dir new_path =
+let symlink ~link_to ~to_dir new_dir new_path =
   with_dirfd "symlink-new" new_dir @@ fun new_dir ->
+  let new_path = nt_path new_dir new_path in
+  let target = Eio_utils.Nt_path.link_target ~cwd:(Sys.getcwd ()) link_to in
   in_worker_thread ~label:"symlink" @@ fun () ->
-  eio_symlinkat link_to new_dir new_path
+  eio_symlinkat target link_to new_dir new_path to_dir
 
 let chmod ~mode new_dir new_path =
   with_dirfd "chmod" new_dir @@ fun new_dir ->

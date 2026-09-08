@@ -341,9 +341,98 @@ CAMLprim value caml_eio_windows_renameat(value v_old_fd, value v_old_path, value
   CAMLreturn(Val_unit);
 }
 
-CAMLprim value caml_eio_windows_symlinkat(value v_old_path, value v_new_fd, value v_new_path)
+/* Enabled on an impersonation token so that only this thread is affected; RevertToSelf undoes it. */
+static void acquire_symlink_privilege(void)
 {
-  uerror("symlinkat is not supported on windows yet", Nothing);
+  HANDLE token;
+  TOKEN_PRIVILEGES p = { 1, { { { 0, 0 }, SE_PRIVILEGE_ENABLED } } };
+
+  if (!ImpersonateSelf(SecurityImpersonation))
+    return;
+  if (OpenThreadToken(GetCurrentThread(), TOKEN_ADJUST_PRIVILEGES, TRUE, &token)) {
+    LookupPrivilegeValue(NULL, SE_CREATE_SYMBOLIC_LINK_NAME, &p.Privileges[0].Luid);
+    AdjustTokenPrivileges(token, FALSE, &p, 0, NULL, NULL);
+    CloseHandle(token);
+  }
+}
+
+/* CreateSymbolicLink takes a path, which would bypass the directory handle. */
+CAMLprim value caml_eio_windows_symlinkat(value v_target, value v_print, value v_dirfd, value v_path, value v_to_dir)
+{
+  CAMLparam4(v_target, v_print, v_dirfd, v_path);
+  HANDLE h, dir;
+  OBJECT_ATTRIBUTES obj_attr;
+  IO_STATUS_BLOCK io_status;
+  UNICODE_STRING relative;
+  wchar_t *path, *target, *print;
+  REPARSE_DATA_BUFFER *buf;
+  size_t target_len, print_len, size;
+  ULONG kind = Bool_val(v_to_dir) ? FILE_DIRECTORY_FILE : FILE_NON_DIRECTORY_FILE;
+  DWORD n, err = 0;
+  NTSTATUS r;
+
+  pNtCreateFile NtCreatefile = (pNtCreateFile)GetProcAddress(GetModuleHandle("ntdll.dll"), "NtCreateFile");
+  caml_unix_check_path(v_path, "symlinkat");
+  caml_unix_check_path(v_target, "symlinkat");
+  dir = Is_some(v_dirfd) ? Handle_val(Field(v_dirfd, 0)) : NULL;
+
+  target = caml_stat_strdup_to_utf16(String_val(v_target));
+  print = caml_stat_strdup_to_utf16(String_val(v_print));
+  target_len = wcslen(target) * sizeof(wchar_t);
+  print_len = wcslen(print) * sizeof(wchar_t);
+  size = FIELD_OFFSET(REPARSE_DATA_BUFFER, SymbolicLinkReparseBuffer.PathBuffer) + target_len + print_len;
+  buf = caml_stat_alloc(size);
+  buf->ReparseTag = IO_REPARSE_TAG_SYMLINK;
+  buf->ReparseDataLength = (USHORT)(size - FIELD_OFFSET(REPARSE_DATA_BUFFER, SymbolicLinkReparseBuffer));
+  buf->Reserved = 0;
+  buf->SymbolicLinkReparseBuffer.SubstituteNameOffset = 0;
+  buf->SymbolicLinkReparseBuffer.SubstituteNameLength = (USHORT)target_len;
+  buf->SymbolicLinkReparseBuffer.PrintNameOffset = (USHORT)target_len;
+  buf->SymbolicLinkReparseBuffer.PrintNameLength = (USHORT)print_len;
+  buf->SymbolicLinkReparseBuffer.Flags = wcsncmp(target, L"\\??\\", 4) == 0 ? 0 : SYMLINK_FLAG_RELATIVE;
+  memcpy(buf->SymbolicLinkReparseBuffer.PathBuffer, target, target_len);
+  memcpy((char *)buf->SymbolicLinkReparseBuffer.PathBuffer + target_len, print, print_len);
+  caml_stat_free(target);
+  caml_stat_free(print);
+
+  path = caml_stat_strdup_to_utf16(String_val(v_path));
+  RtlInitUnicodeString(&relative, path);
+  InitializeObjectAttributes(&obj_attr, &relative, OBJ_CASE_INSENSITIVE, dir, NULL);
+  caml_enter_blocking_section();
+  r = NtCreatefile(
+    &h,
+    FILE_WRITE_ATTRIBUTES | DELETE | SYNCHRONIZE,
+    &obj_attr,
+    &io_status,
+    0,
+    FILE_ATTRIBUTE_NORMAL,
+    (FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE),
+    FILE_CREATE,
+    (FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT | kind),
+    NULL,
+    0
+  );
+  if (!NT_SUCCESS(r)) {
+    err = RtlNtStatusToDosError(r);
+  } else {
+    acquire_symlink_privilege();
+    if (!DeviceIoControl(h, FSCTL_SET_REPARSE_POINT, buf, (DWORD)size, NULL, 0, &n, NULL)) {
+      FILE_DISPOSITION_INFO undo = { TRUE };
+      err = GetLastError();
+      SetFileInformationByHandle(h, FileDispositionInfo, &undo, sizeof undo);
+    }
+    RevertToSelf();
+    CloseHandle(h);
+  }
+  caml_leave_blocking_section();
+  caml_stat_free(path);
+  caml_stat_free(buf);
+  if (err) {
+    caml_win32_maperr(err);
+    uerror("symlinkat", v_path);
+  }
+
+  CAMLreturn(Val_unit);
 }
 
 CAMLprim value caml_eio_windows_spawn(value v_errors, value v_actions)

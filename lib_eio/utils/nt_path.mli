@@ -8,6 +8,9 @@
 
 include Eio.Fs.Pi.PATH
 
+val ( / ) : string -> string -> string
+(** [a / b] is [join a b]. *)
+
 val is_relative : string -> bool
 (** [is_relative p] is [true] unless [p] begins with a volume or a separator.
     A drive-relative path such as [C:x] is not relative, since it is resolved
@@ -28,3 +31,8 @@ val to_nt : cwd:string -> string -> string
     A relative [path] is resolved against [cwd] and, as in Win32, ["/"] is a
     separator and ["."] and [".."] components are removed. Verbatim ([\\?\])
     and NT ([\??\]) paths are passed through unchanged. *)
+
+val link_target : cwd:string -> string -> string
+(** [link_target ~cwd p] is the name Windows stores in a symlink to [p]:
+    a relative [p] keeps its form, with ["\\"] separators, and an absolute
+    one is [to_nt ~cwd p]. *)

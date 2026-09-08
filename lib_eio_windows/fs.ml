@@ -182,8 +182,10 @@ end = struct
       Err.run (Low_level.rename ?old_dir old_path ?new_dir) new_path
 
   let symlink ~link_to t path =
+    let parent = Err.run Low_level.realpath Nt_path.(dirname (t.dir_path / path)) in
+    let to_dir = try (Low_level.stat Nt_path.(parent / link_to)).st_kind = Unix.S_DIR with Unix.Unix_error _ -> false in
     with_parent_dir t path @@ fun dirfd path ->
-    Err.run (Low_level.symlink ~link_to dirfd) path
+    Err.run (Low_level.symlink ~link_to ~to_dir dirfd) path
 
   let close t = t.closed <- true
 

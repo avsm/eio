@@ -59,9 +59,10 @@ val rename : ?old_dir:fd -> string -> ?new_dir:fd -> string -> unit
     existing file or empty directory. Some volumes such as FAT cannot
     replace a directory and will fail. *)
 
-val symlink : link_to:string -> fd option -> string -> unit
-(** [symlink ~link_to dir path] will create a new symlink at [dir / path]
-    linking to [link_to]. *)
+val symlink : link_to:string -> to_dir:bool -> fd option -> string -> unit
+(** [symlink ~link_to ~to_dir dir path] will create a new symlink at [dir / path]
+    linking to [link_to]. Windows links are typed, so [to_dir] says whether
+    [link_to] is a directory. *)
 
 val chmod : mode:int -> fd option -> string -> unit
 (** [chmod ~mode path] is just a non-blocking call to {! Unix.chmod} when
