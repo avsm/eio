@@ -248,7 +248,7 @@ CAMLprim value caml_eio_windows_unlinkat(value v_dirfd, value v_pathname, value 
     FILE_ATTRIBUTE_NORMAL, // TODO: Could check flags to see if we can do READONLY here a la OCaml
     (FILE_SHARE_DELETE),
     FILE_OPEN,
-    ((Bool_val(v_dir) ? FILE_DIRECTORY_FILE : FILE_NON_DIRECTORY_FILE) | FILE_SYNCHRONOUS_IO_NONALERT | FILE_DELETE_ON_CLOSE),
+    ((Bool_val(v_dir) ? FILE_DIRECTORY_FILE : FILE_NON_DIRECTORY_FILE) | FILE_SYNCHRONOUS_IO_NONALERT | FILE_DELETE_ON_CLOSE | FILE_OPEN_REPARSE_POINT),
     NULL, // Extended attribute buffer
     0     // Extended attribute buffer length
   );
