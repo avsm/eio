@@ -38,25 +38,27 @@ let rec do_nonblocking ty fn fd =
       );
     do_nonblocking ty fn fd
 
+let transfer label ty op fd =
+  match Fd.is_blocking fd with
+  | true ->
+    Fd.use_exn label fd @@ fun fd ->
+    in_worker_thread ~label (fun () -> op fd)
+  | false ->
+    (match ty with Read -> await_readable fd | Write -> await_writable fd);
+    Fd.use_exn label fd @@ fun fd ->
+    do_nonblocking ty op fd
+
 let read fd buf start len =
-  await_readable fd;
-  Fd.use_exn "read" fd @@ fun fd ->
-  do_nonblocking Read (fun fd -> Unix.read fd buf start len) fd
+  transfer "read" Read (fun fd -> Unix.read fd buf start len) fd
 
 let read_cstruct fd (buf:Cstruct.t) =
-  await_readable fd;
-  Fd.use_exn "read_cstruct" fd @@ fun fd ->
-  do_nonblocking Read (fun fd -> Unix.read_bigarray fd buf.buffer buf.off buf.len) fd
+  transfer "read_cstruct" Read (fun fd -> Unix.read_bigarray fd buf.buffer buf.off buf.len) fd
 
 let write fd buf start len =
-  await_writable fd;
-  Fd.use_exn "write" fd @@ fun fd ->
-  do_nonblocking Write (fun fd -> Unix.write fd buf start len) fd
+  transfer "write" Write (fun fd -> Unix.write fd buf start len) fd
 
 let write_cstruct fd (buf:Cstruct.t) =
-  await_writable fd;
-  Fd.use_exn "write_cstruct" fd @@ fun fd ->
-  do_nonblocking Write (fun fd -> Unix.write_bigarray fd buf.buffer buf.off buf.len) fd
+  transfer "write_cstruct" Write (fun fd -> Unix.write_bigarray fd buf.buffer buf.off buf.len) fd
 
 let sleep_until time =
   Sched.enter @@ fun t k ->
