@@ -36,30 +36,14 @@ module Process = struct
     handle : Fd.t;
     mutable signalled : int option;
     exited : (int, exn) result Promise.t;
-    resolve : (int, exn) result Promise.u;
-    mutable waiting : bool;
     mutable hook : Switch.hook;         (* Removed once the process has been reaped. *)
   }
   type tag = [ `Generic | `Unix ]
 
   let pid t = t.pid
 
-  let start_waiting t =
-    t.waiting <- true;
-    Fd.use_exn "process_wait" t.handle @@ fun h ->
-    ignore (
-      Sched.enter (fun sched k ->
-          Sched.await_thread sched k ~finished:(Promise.resolve t.resolve)
-            (fun () -> eio_process_wait h))
-      : int)
-
   let await t =
-    if not t.waiting then start_waiting t;
-    let code =
-      match Promise.await t.exited with
-      | Ok code -> code
-      | Error ex -> raise ex
-    in
+    let code = Promise.await_exn t.exited in
     ignore (Switch.try_remove_hook t.hook : bool);
     t.hook <- Switch.null_hook;
     match t.signalled with
@@ -119,8 +103,24 @@ module Impl = struct
       in
       let handle = Fd.of_unix ~sw ~blocking:true ~close_unix:true raw_handle in
       let exited, resolve = Promise.create () in
-      let t = { Process.pid; handle; signalled = None; exited; resolve;
-                waiting = false; hook = Switch.null_hook } in
+      (* Wait for the child on a thread of its own. Waiting is a blocking call
+         with no overlapped form, and every fiber that wants the exit status —
+         including the switch hook below, which runs after the spawning fiber
+         may be long gone — should get it, so the result goes to a promise
+         rather than to whoever happened to ask first. The thread ends when the
+         child does, and the switch always ends by stopping the child. *)
+      let _ : Thread.t =
+        Thread.create (fun () ->
+            let r =
+              match Fd.use_exn "process_wait" handle eio_process_wait with
+              | code -> Ok code
+              | exception ex -> Error ex
+            in
+            Promise.resolve resolve r)
+          ()
+      in
+      let t = { Process.pid; handle; signalled = None; exited;
+                hook = Switch.null_hook } in
       t.hook <- Switch.on_release_cancellable sw (fun () -> Process.stop t);
       process t
   end

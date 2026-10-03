@@ -302,6 +302,10 @@ static wchar_t *env_block_of_array(value v_env)
   return block;
 }
 
+/* Held across duplicating our stdio handles and creating the child, so that
+   two spawns cannot see each other's inheritable duplicates. */
+static SRWLOCK spawn_lock = SRWLOCK_INIT;
+
 CAMLprim value caml_eio_windows_spawn(value v_cwd, value v_env,
                                       value v_stdin, value v_stdout, value v_stderr,
                                       value v_cmdline)
@@ -313,12 +317,11 @@ CAMLprim value caml_eio_windows_spawn(value v_cwd, value v_env,
   wchar_t *cmdline = NULL, *cwd = NULL, *env_block = NULL;
   HANDLE src[3];
   HANDLE dup[3] = { NULL, NULL, NULL };
-  STARTUPINFOEXW si;
+  STARTUPINFOW si;
   PROCESS_INFORMATION pi;
-  SIZE_T attr_size = 0;
   BOOL ok = FALSE;
   DWORD err = 0;
-  DWORD create_flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT;
+  DWORD create_flags = CREATE_UNICODE_ENVIRONMENT;
   HANDLE cur = GetCurrentProcess();
 
   memset(&si, 0, sizeof(si));
@@ -335,48 +338,38 @@ CAMLprim value caml_eio_windows_spawn(value v_cwd, value v_env,
   src[1] = Handle_val(v_stdout);
   src[2] = Handle_val(v_stderr);
 
-  for (int i = 0; i < 3; i++) {
-    if (!DuplicateHandle(cur, src[i], cur, &dup[i], 0, TRUE, DUPLICATE_SAME_ACCESS)) {
-      err = GetLastError();
-      goto cleanup;
-    }
-  }
-
-  si.StartupInfo.cb = sizeof(STARTUPINFOEXW);
-  si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-  si.StartupInfo.hStdInput  = dup[0];
-  si.StartupInfo.hStdOutput = dup[1];
-  si.StartupInfo.hStdError  = dup[2];
+  si.cb = sizeof(STARTUPINFOW);
+  si.dwFlags = STARTF_USESTDHANDLES;
 
   if (!GetConsoleWindow()) create_flags |= CREATE_NO_WINDOW;
 
-  InitializeProcThreadAttributeList(NULL, 1, 0, &attr_size);
-  si.lpAttributeList = caml_stat_alloc(attr_size);
-  if (!InitializeProcThreadAttributeList(si.lpAttributeList, 1, 0, &attr_size)) {
-    err = GetLastError();
-    caml_stat_free(si.lpAttributeList);
-    si.lpAttributeList = NULL;
-    goto cleanup;
-  }
-  if (!UpdateProcThreadAttribute(si.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-                                 dup, 3 * sizeof(HANDLE), NULL, NULL)) {
-    err = GetLastError();
-    goto cleanup;
-  }
-
+  /* The child gets every handle that is marked inheritable when it is created,
+     which is what makes clearing close-on-exec pass a descriptor down, as it
+     does on Unix. The flip side is that two spawns running at once would each
+     see the other's stdio duplicates, so the window in which ours are
+     inheritable is held by one thread at a time. The runtime lock is dropped
+     first, so a thread waiting for that does not stall the whole program. */
   caml_enter_blocking_section();
-  ok = CreateProcessW(NULL, cmdline, NULL, NULL, TRUE, create_flags, env_block, cwd,
-                      &si.StartupInfo, &pi);
-  if (!ok) err = GetLastError();
-  caml_leave_blocking_section();
-
-cleanup:
-  if (si.lpAttributeList) {
-    DeleteProcThreadAttributeList(si.lpAttributeList);
-    caml_stat_free(si.lpAttributeList);
+  AcquireSRWLockExclusive(&spawn_lock);
+  for (int i = 0; i < 3; i++) {
+    if (!DuplicateHandle(cur, src[i], cur, &dup[i], 0, TRUE, DUPLICATE_SAME_ACCESS)) {
+      err = GetLastError();
+      break;
+    }
+  }
+  if (err == 0) {
+    si.hStdInput  = dup[0];
+    si.hStdOutput = dup[1];
+    si.hStdError  = dup[2];
+    ok = CreateProcessW(NULL, cmdline, NULL, NULL, TRUE, create_flags, env_block, cwd,
+                        &si, &pi);
+    if (!ok) err = GetLastError();
   }
   for (int i = 0; i < 3; i++)
     if (dup[i]) CloseHandle(dup[i]);
+  ReleaseSRWLockExclusive(&spawn_lock);
+  caml_leave_blocking_section();
+
   caml_stat_free(cmdline);
   caml_stat_free(cwd);
   caml_stat_free(env_block);

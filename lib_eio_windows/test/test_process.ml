@@ -4,20 +4,9 @@ module Process = Eio.Process
 
 let process env = Eio.Stdenv.process_mgr env
 
-let read_all flow =
-  let b = Buffer.create 100 in
-  Eio.Flow.copy flow (Eio.Flow.buffer_sink b);
-  Buffer.contents b
+let status = Alcotest.of_pp Process.pp_status
 
-let check_status msg expected = function
-  | `Exited code when code = expected -> ()
-  | status ->
-    Alcotest.failf "%s: expected exit %d, got %a" msg expected Process.pp_status status
 
-let check_signaled msg expected = function
-  | `Signaled signum when signum = expected -> ()
-  | status ->
-    Alcotest.failf "%s: expected signal %d, got %a" msg expected Process.pp_status status
 
 let std_fds =
   Eio_unix.Fd.[ 0, stdin, `Blocking; 1, stdout, `Blocking; 2, stderr, `Blocking ]
@@ -26,9 +15,9 @@ let test_exit_status env () =
   Switch.run @@ fun sw ->
   let mgr = process env in
   let ok = Process.spawn ~sw mgr ["cmd"; "/c"; "exit"; "0"] in
-  check_status "exit 0" 0 (Process.await ok);
+  Alcotest.check status "exit 0" (`Exited 0) (Process.await ok);
   let bad = Process.spawn ~sw mgr ["cmd"; "/c"; "exit"; "5"] in
-  check_status "exit 5" 5 (Process.await bad)
+  Alcotest.check status "exit 5" (`Exited 5) (Process.await bad)
 
 let test_stdout_capture env () =
   let line = Process.parse_out (process env) Eio.Buf_read.line ["cmd"; "/c"; "echo"; "hello"] in
@@ -61,11 +50,10 @@ let test_explicit_pipes env () =
   Eio.Flow.close to_parent;
   Eio.Flow.copy_string "hello\r\n" to_child;
   Eio.Flow.close to_child;
-  let out = read_all from_child in
-  check_status "findstr" 0 (Process.await child);
+  let out = Eio.Flow.read_all from_child in
+  Alcotest.check status "findstr" (`Exited 0) (Process.await child);
   Alcotest.(check string) "roundtrip" "hello" (String.trim out)
 
-(* A handle leaking into a sibling would delay its pipe's EOF *)
 let test_stress env () =
   let mgr = process env in
   let spawn_one i =
@@ -74,17 +62,19 @@ let test_stress env () =
     let token = Printf.sprintf "tok-%d" i in
     let child = Process.spawn ~sw mgr ~stdout:to_parent ["cmd"; "/c"; "echo"; token] in
     Eio.Flow.close to_parent;
-    let out = read_all from_child in
-    check_status token 0 (Process.await child);
+    let out = Eio.Flow.read_all from_child in
+    Alcotest.check status token (`Exited 0) (Process.await child);
     Alcotest.(check string) token token (String.trim out)
   in
   Fiber.List.iter ~max_fibers:8 spawn_one (List.init 1_000 Fun.id)
 
+(* A pipe the child was not given, and which is close-on-exec, must not reach
+   it: a leaked write end would hold the pipe open and we would never see EOF.
+   The child is long-running so a leak shows up as a timeout rather than passing
+   anyway because the child had already exited. *)
 let test_no_handle_leak env () =
   Switch.run @@ fun sw ->
   let r, w = Eio_unix.pipe sw in
-  let w_fd = Option.get (Eio_unix.Resource.fd_opt w) in
-  Eio_unix.Fd.use_exn "pipe" w_fd Unix.clear_close_on_exec;
   (* TODO: check localhost pinging works on Windows CI *)
   let child = Process.spawn ~sw (process env) ["ping"; "-n"; "30"; "127.0.0.1"] in
   Eio.Flow.close w;
@@ -102,6 +92,36 @@ let test_no_handle_leak env () =
   | `Eof -> ()
   | `Data -> Alcotest.fail "unexpected data on pipe"
   | `Timeout -> Alcotest.fail "child inherited the pipe's write handle"
+
+(* The other way round: clearing close-on-exec hands the descriptor down, as on
+   Unix, so the child holds the pipe open and closing our own write end is not
+   enough to produce EOF.
+
+   This waits for EOF rather than racing it against a timeout, because a read
+   that blocks in the thread pool cannot be cancelled and [Fiber.first] would
+   sit there until it returned anyway. Instead the child is one we can retire on
+   cue, and the test is that EOF does not arrive until we do so. *)
+let test_inheritable_handle_passed env () =
+  Switch.run @@ fun sw ->
+  let clock = Eio.Stdenv.clock env in
+  let child_stdin, to_child = Eio_unix.pipe sw in
+  let r, w = Eio_unix.pipe sw in
+  Eio_unix.Fd.use_exn "pipe" (Option.get (Eio_unix.Resource.fd_opt w))
+    Unix.clear_close_on_exec;
+  let child = Process.spawn ~sw (process env) ~stdin:child_stdin ["findstr"; "x"] in
+  Eio.Flow.close w;
+  let released = ref false in
+  Fiber.both
+    (fun () ->
+       (match Eio.Flow.single_read r (Cstruct.create 1) with
+        | _ -> Alcotest.fail "unexpected data on pipe"
+        | exception End_of_file -> ());
+       Alcotest.(check bool) "EOF waited for the child to exit" true !released)
+    (fun () ->
+       Eio.Time.sleep clock 0.2;
+       released := true;
+       Eio.Flow.close to_child);
+  ignore (Process.await child : Process.exit_status)
 
 (* cmd.exe needs SystemRoot *)
 let test_env env () =
@@ -144,7 +164,7 @@ let test_slow_stdin env () =
     (fun () ->
        Eio.Time.sleep clock 0.1;
        Process.signal child Sys.sigkill);
-  check_signaled "killed while the write was blocked" Sys.sigkill (Process.await child)
+  Alcotest.check status "killed while the write was blocked" (`Signaled Sys.sigkill) (Process.await child)
 
 let test_quoting env () =
   let line = Process.parse_out (process env) Eio.Buf_read.line ["cmd"; "/c"; "echo"; "hello world"] in
@@ -156,7 +176,7 @@ let test_explicit_executable env () =
     Eio_unix.Process.spawn_unix ~sw (process env) ~executable:"cmd"
       ~fds:std_fds ["ignored-argv0"; "/c"; "exit"; "7"]
   in
-  check_status "exit 7" 7 (Process.await child)
+  Alcotest.check status "exit 7" (`Exited 7) (Process.await child)
 
 let test_fds_above_2_rejected env () =
   Switch.run @@ fun sw ->
@@ -167,20 +187,39 @@ let test_fds_above_2_rejected env () =
                  ~fds:(std_fds @ [3, Eio_unix.Fd.stdin, `Blocking])
                  ["cmd"; "/c"; "exit"; "0"]))
 
-(* An unlisted descriptor is inherited, as on Unix. *)
+(* An unlisted descriptor is inherited, as on Unix. Checking the child's exit
+   status would not show that, since it would exit the same way with no
+   descriptors at all, so point our own stdin at a pipe and leave fd 0 out of
+   the list: the child has to read what we send to know what to print. *)
 let test_missing_std_fd_inherited env () =
   Switch.run @@ fun sw ->
+  let in_r, in_w = Eio_unix.pipe sw in
+  let out_r, out_w = Eio_unix.pipe sw in
+  let out_w_fd = Option.get (Eio_unix.Resource.fd_opt out_w) in
+  let saved_stdin = Unix.dup ~cloexec:true Unix.stdin in
+  Fun.protect
+    ~finally:(fun () ->
+        Unix.dup2 ~cloexec:false saved_stdin Unix.stdin;
+        Unix.close saved_stdin)
+  @@ fun () ->
+  Eio_unix.Fd.use_exn "stdin" (Option.get (Eio_unix.Resource.fd_opt in_r))
+    (fun h -> Unix.dup2 ~cloexec:false h Unix.stdin);
   let child =
-    Eio_unix.Process.spawn_unix ~sw (process env) ~executable:"cmd.exe"
-      ~fds:[] ["cmd"; "/c"; "exit"; "3"]
+    Eio_unix.Process.spawn_unix ~sw (process env) ~executable:"findstr"
+      ~fds:[ 1, out_w_fd, `Blocking ] ["findstr"; "hello"]
   in
-  check_status "inherited" 3 (Process.await child)
+  Eio.Flow.close out_w;
+  Eio.Flow.copy_string "hello\r\n" in_w;
+  Eio.Flow.close in_w;
+  let out = Eio.Flow.read_all out_r in
+  Alcotest.check status "findstr" (`Exited 0) (Process.await child);
+  Alcotest.(check string) "read from the inherited stdin" "hello" (String.trim out)
 
 let test_terminate env () =
   Switch.run @@ fun sw ->
   let child = Process.spawn ~sw (process env) ["ping"; "-n"; "30"; "127.0.0.1"] in
   Process.signal child Sys.sighup;
-  check_signaled "terminated" Sys.sighup (Process.await child)
+  Alcotest.check status "terminated" (`Signaled Sys.sighup) (Process.await child)
 
 let test_await_timeout env () =
   Switch.run @@ fun sw ->
@@ -190,7 +229,7 @@ let test_await_timeout env () =
    | status -> Alcotest.failf "await should have timed out, got %a" Process.pp_status status
    | exception Eio.Time.Timeout -> ());
   Process.signal child Sys.sigterm;
-  check_signaled "terminated after the timeout" Sys.sigterm (Process.await child)
+  Alcotest.check status "terminated after the timeout" (`Signaled Sys.sigterm) (Process.await child)
 
 let test_cwd_escape env () =
   Switch.run @@ fun sw ->
@@ -211,9 +250,9 @@ let test_env_empty_entry env () =
 let test_signal_after_exit env () =
   Switch.run @@ fun sw ->
   let child = Process.spawn ~sw (process env) ["cmd"; "/c"; "exit"; "0"] in
-  check_status "exit 0" 0 (Process.await child);
+  Alcotest.check status "exit 0" (`Exited 0) (Process.await child);
   Process.signal child Sys.sigkill;
-  check_status "status unchanged" 0 (Process.await child)
+  Alcotest.check status "status unchanged" (`Exited 0) (Process.await child)
 
 let test_stop_on_switch_release env () =
   let t0 = Unix.gettimeofday () in
@@ -238,6 +277,7 @@ let tests env = [
   "stdin-flow-copy", `Quick, test_stdin_flow_copy env;
   "explicit-pipes", `Quick, test_explicit_pipes env;
   "no-handle-leak", `Quick, test_no_handle_leak env;
+  "inheritable-handle-passed", `Quick, test_inheritable_handle_passed env;
   "env", `Quick, test_env env;
   "cwd", `Quick, test_cwd env;
   "quoting", `Quick, test_quoting env;
