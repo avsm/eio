@@ -113,14 +113,45 @@ let getrandom { Cstruct.buffer; off; len } =
   in_worker_thread @@ fun () ->
   loop 0
 
-external eio_symlink_size : Unix.file_descr -> int option = "caml_eio_windows_symlink_size"
+external eio_reparse_point : Unix.file_descr -> string option = "caml_eio_windows_reparse_point"
+
+(* The target of a symlink or junction, from its REPARSE_DATA_BUFFER. *)
+let link_target data =
+  let decode first last =
+    let b = Buffer.create (last - first) in
+    let rec aux i =
+      if i < last then (
+        let d = String.get_utf_16le_uchar data i in
+        Buffer.add_utf_8_uchar b (Uchar.utf_decode_uchar d);
+        aux (i + Uchar.utf_decode_length d)
+      )
+    in
+    aux first;
+    Eio_utils.Nt_path.to_win32 (Buffer.contents b)
+  in
+  let path_buffer =
+    match String.get_int32_le data 0 with
+    | 0xA000000Cl -> Some 20    (* IO_REPARSE_TAG_SYMLINK *)
+    | 0xA0000003l -> Some 16    (* IO_REPARSE_TAG_MOUNT_POINT *)
+    | _ -> None
+  in
+  match path_buffer with
+  | None -> None
+  | Some start ->
+    let first = start + String.get_uint16_le data 8 in
+    let last = first + String.get_uint16_le data 10 in
+    if last > String.length data then None else Some (decode first last)
+
+let read_link_unix fd = Option.bind (eio_reparse_point fd) link_target
+
+let read_link_fd fd = Fd.use_exn "read_link" fd read_link_unix
 
 let fstat fd =
   Fd.use_exn "fstat" fd @@ fun fd ->
   let st = Unix.LargeFile.fstat fd in
-  match eio_symlink_size fd with
+  match read_link_unix fd with
   | None -> st
-  | Some size -> { st with st_kind = S_LNK; st_size = Int64.of_int size }
+  | Some target -> { st with st_kind = S_LNK; st_size = Int64.of_int (String.length target) }
 
 let lstat path =
   in_worker_thread @@ fun () ->
@@ -147,10 +178,6 @@ let readdir path =
   | exception ex ->
     let bt = Printexc.get_raw_backtrace () in
     Unix.closedir h; Printexc.raise_with_backtrace ex bt
-
-let read_link ?dirfd path =
-  in_worker_thread @@ fun () ->
-  Eio_unix.Private.read_link dirfd path
 
 let chown ?dirfd ~follow:_ ?(uid=(-1L)) ?(gid=(-1L)) path =
   in_worker_thread @@ fun () ->
@@ -237,14 +264,37 @@ let nt_path dirfd path =
 
 type follow = Follow | Nofollow | Open_link
 
-external eio_openat : Unix.file_descr option -> follow -> string -> Flags.Open.t -> Flags.Disposition.t -> Flags.Create.t -> Unix.file_descr = "caml_eio_windows_openat_bytes" "caml_eio_windows_openat"
+external eio_openat :
+  Unix.file_descr option -> beneath:bool -> open_link:bool -> string ->
+  Flags.Open.t -> Flags.Disposition.t -> Flags.Create.t -> Unix.file_descr
+  = "caml_eio_windows_openat_bytes" "caml_eio_windows_openat"
 
-let openat ?dirfd ?(follow=Follow) ~sw path flags dis create =
+let openat ?dirfd ?(beneath=false) ?(follow=Follow) ~sw path flags dis create =
   with_dirfd "openat" dirfd @@ fun dirfd ->
   Switch.check sw;
   let path = nt_path dirfd path in
-  in_worker_thread ~label:"openat" (fun () -> eio_openat dirfd follow path Flags.Open.(flags + cloexec (* + nonblock *)) dis create)
+  let flags = Flags.Open.(flags + cloexec (* + nonblock *)) in
+  in_worker_thread ~label:"openat" (fun () ->
+      match Eio_utils.Nt_path.split path with
+      | Some (parent, leaf) when follow = Nofollow && not beneath ->
+        (* Open the leaf beneath its parent, so the kernel refuses a link
+           there before acting on it (e.g. by truncating it). *)
+        let parent =
+          eio_openat dirfd ~beneath:false ~open_link:false parent
+            Flags.Open.synchronise Flags.Disposition.open_ Flags.Create.directory
+        in
+        Fun.protect ~finally:(fun () -> Unix.close parent) @@ fun () ->
+        eio_openat (Some parent) ~beneath:true ~open_link:false leaf flags dis create
+      | _ -> eio_openat dirfd ~beneath ~open_link:(follow = Open_link) path flags dis create
+    )
   |> Fd.of_unix ~sw ~blocking:false ~close_unix:true
+
+let read_link ?dirfd path =
+  Switch.run @@ fun sw ->
+  let fd = openat ?dirfd ~follow:Open_link ~sw path Flags.Open.synchronise Flags.Disposition.open_ Flags.Create.empty in
+  match read_link_fd fd with
+  | Some target -> target
+  | None -> raise (Unix.Unix_error (EINVAL, "readlink", path))
 
 let mkdir ?dirfd ?(follow=Follow) ~mode:_ path =
   Switch.run @@ fun sw ->
@@ -269,12 +319,10 @@ let rename ?old_dir old_path ?new_dir new_path =
   eio_renameat old_dir old_path new_dir new_path
 
 
-external eio_symlinkat : string -> Unix.file_descr option -> string -> unit = "caml_eio_windows_symlinkat"
-
-let symlink ~link_to new_dir new_path =
-  with_dirfd "symlink-new" new_dir @@ fun new_dir ->
-  in_worker_thread ~label:"symlink" @@ fun () ->
-  eio_symlinkat link_to new_dir new_path
+let symlink ?(to_dir=false) ~link_to new_dir new_path =
+  match new_dir with
+  | None -> in_worker_thread ~label:"symlink" (fun () -> Unix.symlink ~to_dir link_to new_path)
+  | Some _ -> raise (Unix.Unix_error (EOPNOTSUPP, "symlink", new_path))
 
 let chmod ~mode new_dir new_path =
   with_dirfd "chmod" new_dir @@ fun new_dir ->
