@@ -14,28 +14,23 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
 
-(* See fs.mli for how Windows paths and sandboxes work. *)
-
 open Eio.Std
 
 module Fd = Eio_unix.Fd
 module Nt_path = Eio_utils.Nt_path
 
 (* Opening paths beneath a sandbox directory [dir].
-
    Each open is relative to a handle on [dir] with [~beneath:true], so the kernel
-   refuses to follow any link and ".." can't be used. If that fails because of a
-   link, we find the link, replace it with its target, and try again. *)
+   refuses to follow symlinks. If that fails, we find the link, replace it with its
+   target, and try again. *)
 module Sandbox = struct
-  let max_follows = 40          (* As on Linux; see path_resolution(7) *)
+  let max_follows = 40  (* As Linux *)
 
-  (* The components of [path] below [root], where [root] is (the real path of) [dir]. *)
   let components ~dir ~root path =
     match Nt_path.beneath ~root path with
     | Some c -> c
     | None -> raise @@ Eio.Fs.err (Permission_denied (Err.Outside_sandbox (path, dir)))
 
-  (* [join base comps] is [base] followed by [comps]. *)
   let join base = function
     | [] -> base
     | comps -> Nt_path.join base (String.concat "\\" comps)
@@ -43,7 +38,6 @@ module Sandbox = struct
   let open_at root ~sw ~follow comps =
     Low_level.openat ~sw ~dirfd:root ~beneath:true ~follow (join "" comps)
 
-  (* The target of [comps], if it is a link. *)
   let link_target root comps =
     Switch.run @@ fun sw ->
     let open Low_level in
@@ -73,7 +67,7 @@ module Sandbox = struct
       match open_at root ~sw ~follow comps flags disp create with
       | fd -> fd, join root_path comps
       | exception (Unix.Unix_error _ as ex) ->
-        (* Usually a link gives [ELOOP], but a link at the leaf can fail first if it's
+        (* Usually a link gives [ELOOP], but on Windows link at the leaf can fail first if it's
            to a file and we wanted a directory, or the other way around. *)
         match find_link root ~follow comps with
         | Some (n, _) when n = List.length comps && follow = Low_level.Nofollow ->
