@@ -33,7 +33,7 @@ let late_registration ~close_unix ~remove ~fail =
     assert (close_unix && (not remove || fail))
 
 let tests = [
-  "registration after close starts", `Quick, (fun () ->
+  "registration after close starts", `Quick, (fun _ () ->
       List.iter (fun close_unix ->
           List.iter (fun remove ->
               List.iter (fun fail ->

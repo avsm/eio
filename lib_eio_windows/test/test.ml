@@ -9,8 +9,8 @@ module Timeout = struct
     if diff >= 0.01 then () else Alcotest.failf "Expected bigger difference than %f" diff
 
 
-  let tests env = [
-    "timeout", `Quick, test env#clock
+  let tests = [
+    "timeout", `Quick, (fun env -> test env#clock)
   ]
 end
 
@@ -23,8 +23,8 @@ module Random = struct
     Eio.Flow.read_exact src b2;
     Alcotest.(check bool) "different random" (not (Cstruct.equal b1 b2)) true
 
-  let tests env = [
-    "different", `Quick, test_random env
+  let tests = [
+    "different", `Quick, test_random
   ]
 end
 
@@ -46,7 +46,7 @@ module Dla = struct
     Alcotest.(check int) "answer" ans 42
 
   let tests = [
-    "dla", `Quick, test_dla
+    "dla", `Quick, (fun _ -> test_dla)
   ]
 end
 
@@ -75,21 +75,24 @@ module Await_fd = struct
       Unix.close d
 
   let tests = [
-    "cancel", `Quick, test_cancel;
+    "cancel", `Quick, (fun _ -> test_cancel);
   ]
 end
 
 
 let () =
-  Eio_windows.run @@ fun env ->
-  Alcotest.run "eio_windows" [
-    "iocp", Test_iocp.tests env;
-    "net", Test_net.tests env;
-    "fs", Test_fs.tests env;
-    "process", Test_process.tests env;
-    "timeout", Timeout.tests env;
-    "random", Random.tests env;
+  let run (name, speed, test) =
+    name, speed, (fun () -> Eio_windows.run (fun env -> test env ()))
+  in
+  let suites = [
+    "iocp", Test_iocp.tests ();
+    "net", Test_net.tests ();
+    "fs", Test_fs.tests ();
+    "process", Test_process.tests ();
+    "timeout", Timeout.tests;
+    "random", Random.tests;
     "dla", Dla.tests;
     "fd", Test_fd.tests;
     "await", Await_fd.tests;
-  ]
+  ] in
+  Alcotest.run "eio_windows" (List.map (fun (name, tests) -> name, List.map run tests) suites)

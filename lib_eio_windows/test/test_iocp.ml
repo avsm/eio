@@ -12,6 +12,6 @@ let resolve env () =
   | _ -> Alcotest.fail "resolved an unknown service"
   | exception Eio.Io (Eio.Net.E (Address_lookup_failed SERVICE), _) -> ()
 
-let tests env = List.map (fun (name, fn) -> name, `Quick, fn) [
-    "resolver service and error codes", resolve env;
+let tests () = List.map (fun (name, fn) -> name, `Quick, fn) [
+    "resolver service and error codes", resolve;
   ]
