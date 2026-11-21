@@ -40,13 +40,15 @@ let run_event_loop fn x =
       match e with
       | Eio_unix.Private.Get_monotonic_clock -> Some (fun k -> continue k Time.mono_clock)
       | Eio_unix.Private.Import_file fd -> Some (fun k ->
-          Fd.use_exn "Import_file" fd Unix.set_nonblock;
           continue k (Flow.of_fd fd :> Eio_unix.File.rw_ty r)
         )
       | Eio_unix.Net.Import_socket_stream (sw, close_unix, unix_fd) -> Some (fun k ->
-          let fd = Fd.of_unix ~sw ~blocking:false ~close_unix unix_fd in
-          (* TODO: On Windows, if the FD from Unix.pipe () is passed this will fail *)
-          (try Unix.set_nonblock unix_fd with Unix.Unix_error (Unix.ENOTSOCK, _, _) -> ());
+          let blocking = match File_io.kind unix_fd with
+            | File_io.Socket -> Unix.set_nonblock unix_fd; false
+            | File_io.Synchronous | File_io.Synchronous_file -> true
+            | File_io.Pipe | File_io.File | File_io.Append_file -> false
+          in
+          let fd = Fd.of_unix ~sw ~blocking ~close_unix unix_fd in
           continue k (Flow.stream fd :> _ Eio_unix.Net.stream_socket)
         )
       | Eio_unix.Net.Import_socket_listening (sw, close_unix, unix_fd) -> Some (fun k ->

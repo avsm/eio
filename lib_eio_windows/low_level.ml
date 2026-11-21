@@ -1,22 +1,13 @@
 open Eio.Std
 
-(* There are some things that should be improved here:
-
-   - Blocking FDs (e.g. stdout) wait for the FD to become ready and then do a blocking operation.
-     This might not succeed, and will block the whole domain in that case.
-     Ideally, all blocking operations should happen in a sys-thread instead.
-
-   - Various other operations, such as listing a directory, should also be done in a sys-thread
-     to avoid high latencies in the main domain. *)
-
-type ty = Read | Write
-
 let in_worker_thread = Eio_unix.run_in_systhread
 
 module Fd = Eio_unix.Fd
 
 let await_readable fd = Fd.use_exn "await_readable" fd Eio_unix.await_readable
 let await_writable fd = Fd.use_exn "await_writable" fd Eio_unix.await_writable
+
+type ty = Read | Write
 
 let rec do_nonblocking ty fn fd =
   Fiber.yield ();
@@ -27,25 +18,36 @@ let rec do_nonblocking ty fn fd =
     (match ty with Read -> Eio_unix.await_readable fd | Write -> Eio_unix.await_writable fd);
     do_nonblocking ty fn fd
 
-let read fd buf start len =
-  await_readable fd;
-  Fd.use_exn "read" fd @@ fun fd ->
-  do_nonblocking Read (fun fd -> Unix.read fd buf start len) fd
+let read_cstruct fd (buf : Cstruct.t) =
+  Fd.use_exn "read" fd @@ fun raw ->
+  match File_io.kind raw with
+  | File_io.Socket -> Completion.await (fun port ~data -> Iocp.recv port ~data (Completion.handle fd raw) buf)
+  | File_io.Pipe -> Completion.await (fun port ~data -> Iocp.read port ~data (Completion.handle fd raw) buf ~offset:0L)
+  | File_io.File | File_io.Append_file -> File_io.sequential ~write:false ~append:false fd raw buf
+  | (File_io.Synchronous | File_io.Synchronous_file) as kind ->
+    let read () = in_worker_thread (fun () -> Unix.read_bigarray raw buf.buffer buf.off buf.len) in
+    if kind = File_io.Synchronous_file then Eio.Mutex.use_ro (File_io.Sync_locks.get raw) read
+    else File_io.Sync_read.with_reader raw (fun () -> Eio_unix.await_readable raw; read ())
 
-let read_cstruct fd (buf:Cstruct.t) =
-  await_readable fd;
-  Fd.use_exn "read_cstruct" fd @@ fun fd ->
-  do_nonblocking Read (fun fd -> Unix.read_bigarray fd buf.buffer buf.off buf.len) fd
+let write_cstruct fd (buf : Cstruct.t) =
+  Fd.use_exn "write" fd @@ fun raw ->
+  match File_io.kind raw with
+  | File_io.Socket -> Completion.await (fun port ~data -> Iocp.send port ~data (Completion.handle fd raw) buf)
+  | File_io.Pipe -> Completion.await (fun port ~data -> Iocp.write port ~data (Completion.handle fd raw) buf ~offset:0L)
+  | (File_io.File | File_io.Append_file) as kind ->
+    File_io.sequential ~write:true ~append:(kind = File_io.Append_file) fd raw buf
+  | File_io.Synchronous | File_io.Synchronous_file -> in_worker_thread (fun () -> Unix.single_write_bigarray raw buf.buffer buf.off buf.len)
+
+let read fd buf start len =
+  if start < 0 || len < 0 || start > Bytes.length buf - len then invalid_arg "read";
+  let tmp = Cstruct.create len in
+  let n = read_cstruct fd tmp in
+  Cstruct.blit_to_bytes tmp 0 buf start n;
+  n
 
 let write fd buf start len =
-  await_writable fd;
-  Fd.use_exn "write" fd @@ fun fd ->
-  do_nonblocking Write (fun fd -> Unix.write fd buf start len) fd
-
-let write_cstruct fd (buf:Cstruct.t) =
-  await_writable fd;
-  Fd.use_exn "write_cstruct" fd @@ fun fd ->
-  do_nonblocking Write (fun fd -> Unix.write_bigarray fd buf.buffer buf.off buf.len) fd
+  if start < 0 || len < 0 || start > Bytes.length buf - len then invalid_arg "write";
+  write_cstruct fd (Cstruct.of_bytes ~off:start ~len buf)
 
 let sleep_until = Sched.sleep_until
 
@@ -167,29 +169,21 @@ let chown ?dirfd ~follow:_ ?(uid=(-1L)) ?(gid=(-1L)) path =
   | None -> failwith "Chown is unsupported on Windows"
   | Some dirfd -> Eio_unix.Private.chown ~flags:0 ~uid ~gid dirfd path
 
-external eio_readv : Unix.file_descr -> Cstruct.t array -> int = "caml_eio_windows_readv"
-
-external eio_preadv : Unix.file_descr -> Cstruct.t array -> Optint.Int63.t -> int = "caml_eio_windows_preadv"
-external eio_pwritev : Unix.file_descr -> Cstruct.t array -> Optint.Int63.t -> int = "caml_eio_windows_pwritev"
-
 let readv fd bufs =
-  Fd.use_exn "readv" fd @@ fun fd ->
-  do_nonblocking Read (fun fd -> eio_readv fd bufs) fd
+  match Array.find_opt (fun b -> Cstruct.length b > 0) bufs with
+  | None -> 0
+  | Some buf -> read_cstruct fd buf
 
 let writev fd bufs =
-  let rec loop buf = if Cstruct.length buf > 0 then begin
+  let rec loop buf = if Cstruct.length buf > 0 then (
     let n = write_cstruct fd buf in
-    loop @@ Cstruct.shift buf n
-  end in
+    if n = 0 then raise (Unix.Unix_error (EIO, "write", ""));
+    loop (Cstruct.shift buf n)
+  ) in
   List.iter loop bufs
 
-let preadv ~file_offset fd bufs =
-  Fd.use_exn "preadv" fd @@ fun fd ->
-  do_nonblocking Read (fun fd -> eio_preadv fd bufs file_offset) fd
-
-let pwritev ~file_offset fd bufs =
-  Fd.use_exn "pwritev" fd @@ fun fd ->
-  do_nonblocking Write (fun fd -> eio_pwritev fd bufs file_offset) fd
+let preadv ~file_offset fd bufs = File_io.positioned ~write:false ~file_offset fd Array.find_opt bufs
+let pwritev ~file_offset fd bufs = File_io.positioned ~write:true ~file_offset fd Array.find_opt bufs
 
 module Flags = struct
   module Open = struct
@@ -270,7 +264,7 @@ let openat ?dirfd ?(beneath=false) ?(follow=Follow) ~sw path flags dis create =
         eio_openat (Some parent) ~beneath:true ~open_link leaf flags dis create
       | _ -> eio_openat dirfd ~beneath ~open_link path flags dis create
     )
-  |> Fd.of_unix ~sw ~blocking:false ~close_unix:true
+  |> Fd.of_unix ~sw ~blocking:true ~close_unix:true
 
 let read_link ?dirfd path =
   Switch.run @@ fun sw ->
@@ -331,14 +325,8 @@ let chmod ~mode new_dir new_path =
     Unix.chmod new_path mode
 
 let lseek fd off cmd =
-  Fd.use_exn "lseek" fd @@ fun fd ->
-  let cmd =
-    match cmd with
-    | `Set -> Unix.SEEK_SET
-    | `Cur -> Unix.SEEK_CUR
-    | `End -> Unix.SEEK_END
-  in
-  Unix.LargeFile.lseek fd (Optint.Int63.to_int64 off) cmd
+  Fd.use_exn "lseek" fd @@ fun raw ->
+  File_io.seek fd raw (Optint.Int63.to_int64 off) (match cmd with `Set -> 0 | `Cur -> 1 | `End -> 2)
   |> Optint.Int63.of_int64
 
 let fsync fd =
