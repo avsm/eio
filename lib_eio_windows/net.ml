@@ -72,14 +72,13 @@ module Datagram_socket = struct
   let fd t = t.fd
 
   let send t ?dst buf =
-    let dst = Option.map Eio_unix.Net.sockaddr_to_unix dst in
-    let sent = Err.run (Low_level.send_msg t.fd ?dst) (Bytes.unsafe_of_string (Cstruct.copyv buf)) in
-    assert (sent = Cstruct.lenv buf)
+    let dst = Option.map sockaddr_to_unix dst in
+    let buf = Cstruct.concat buf in
+    let sent = Err.run (Datagram.send t.fd ?dst) buf in
+    assert (sent = Cstruct.length buf)
 
   let recv t buf =
-    let b = Bytes.create (Cstruct.length buf) in
-    let recv, addr = Err.run (Low_level.recv_msg t.fd) b in
-    Cstruct.blit_from_bytes b 0 buf 0 recv;
+    let recv, addr = Err.run (Datagram.recv t.fd) buf in
     Eio_unix.Net.sockaddr_of_unix_datagram addr, recv
 
   let shutdown t cmd =
