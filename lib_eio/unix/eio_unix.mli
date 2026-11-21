@@ -25,7 +25,7 @@ module Err : sig
       ]} *)
 end
 
-module Fd = Fd
+module Fd : module type of Fd with type t = Fd.t and module Windows := Fd.Windows
 (** A safe wrapper for {!Unix.file_descr}. *)
 
 (** Eio resources backed by an OS file descriptor. *)
@@ -158,6 +158,7 @@ module Private : sig
     | Pipe : Eio.Switch.t -> (source_ty r * sink_ty r) Effect.t    (** See {!pipe} *)
     | Import_file : Fd.t -> File.rw_ty r Effect.t            (** See {!File.import_rw} *)
 
+  module Windows_fd : module type of Private.Windows_fd
   module Rcfd = Rcfd
 
   (** @canonical Eio_unix.Private.Fork_action *)

@@ -8,7 +8,7 @@ type t = {
   fd : Rcfd.t;
   mutable blocking : tristate;
   mutable seekable : tristate;
-  close_unix : bool;                          (* Whether closing this also closes the underlying FD. *)
+  ownership : Fd_ownership.t;
   mutable release_hook : Eio.Switch.hook;     (* Use this on close to remove switch's [on_release] hook. *)
 }
 
@@ -21,15 +21,16 @@ let use_exn op t f =
 
 let close t =
   Switch.remove_hook t.release_hook;
-  if t.close_unix then (
-    ignore (Rcfd.close t.fd : bool)
-  ) else (
-    ignore (Rcfd.remove t.fd : Unix.file_descr option)
-  )
+  Fd_ownership.close t.ownership t.fd
 
 let remove t =
   Switch.remove_hook t.release_hook;
-  Rcfd.remove t.fd
+  Fd_ownership.remove t.ownership t.fd
+
+module Windows = struct
+  let id t = Fd_ownership.id t.ownership
+  let set_detach t fn = Fd_ownership.set_detach t.ownership fn
+end
 
 let tristate_of_bool_opt = function
   | None -> Unknown
@@ -39,7 +40,7 @@ let tristate_of_bool_opt = function
 let of_unix_no_hook ?(close_unix=true) ?blocking ?seekable fd =
   let seekable = tristate_of_bool_opt seekable in
   let blocking = tristate_of_bool_opt blocking in
-  { fd = Rcfd.make fd; blocking; seekable; close_unix; release_hook = Switch.null_hook }
+  { fd = Rcfd.make fd; blocking; seekable; ownership = Fd_ownership.make ~close_unix; release_hook = Switch.null_hook }
 
 let of_unix ~sw ?blocking ?seekable ~close_unix fd =
   let t = of_unix_no_hook ?blocking ?seekable ~close_unix fd in

@@ -1,0 +1,29 @@
+type t = {
+  close_unix : bool;
+  id : int;
+  mutable detach : unit -> unit;
+}
+
+let next_id = Atomic.make 0
+let make ~close_unix = { close_unix; id = Atomic.fetch_and_add next_id 1; detach = ignore }
+let id t = t.id
+let set_detach t fn = t.detach <- fn
+
+let detach t =
+  let fn = t.detach in
+  t.detach <- ignore;
+  fn ()
+
+let remove t fd =
+  match Rcfd.remove fd with
+  | None -> None
+  | Some raw as result ->
+    match detach t with
+    | () -> result
+    | exception ex ->
+      if t.close_unix then (try Unix.close raw with _ -> ());
+      raise ex
+
+let close t fd =
+  if t.close_unix then ignore (Rcfd.close_after (fun () -> detach t) fd : bool)
+  else ignore (remove t fd : Unix.file_descr option)

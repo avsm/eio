@@ -49,6 +49,10 @@ val close : t -> bool
 
     If you need to wait until the underlying FD is closed, use {!remove} and then close the FD yourself instead. *)
 
+val close_after : (unit -> unit) -> t -> bool
+(** Like {!close}, but run the supplied action after the last user finishes and
+    before closing the descriptor. The descriptor is closed even if the action raises. *)
+
 val remove : t -> Unix.file_descr option
 (** [remove t] closes [t] and returns the FD.
 

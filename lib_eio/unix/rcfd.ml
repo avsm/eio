@@ -108,30 +108,36 @@ let close_fd fd =
 
 (* Note: we could simplify this a bit by incrementing [t.ops], as [remove] does.
    However, that makes dscheck too slow. *)
+let finish_close t prev finish =
+  let next = Closing finish in
+  if Atomic.compare_and_set t.fd prev next then (
+    (* We just transitioned from [open] to [closing/users] or [closing/no-users].
+       We are now the closer. *)
+    if Atomic.get t.ops = 0 && Atomic.compare_and_set t.fd next fully_closed then (
+      (* We were in [closing/no-users] and are now in [closing/closed].
+         We own the FD (and our original callback will never be called). *)
+      finish ()
+    ) else (
+      (* The [next] callback remained installed and there is nothing left for us to do:
+         - If [t.ops] was non-zero, another thread will eventually return it to zero and call our callback.
+         - If the CAS failed, then another thread is invoking our callback. *)
+    );
+    true
+  ) else (
+    (* Another domain became the closer first. *)
+    false
+  )
+
 let close t =
   match Atomic.get t.fd with
-  | Closing _ ->
-    (* Another caller closed [t] before us. *)
-    false
+  | Closing _ -> false
+  | Open fd as prev -> finish_close t prev (fun () -> close_fd fd)
+
+let close_after fn t =
+  match Atomic.get t.fd with
+  | Closing _ -> false
   | Open fd as prev ->
-    let next = Closing (fun () -> close_fd fd) in
-    if Atomic.compare_and_set t.fd prev next then (
-      (* We just transitioned from [open] to [closing/users] or [closing/no-users].
-         We are now the closer. *)
-      if Atomic.get t.ops = 0 && Atomic.compare_and_set t.fd next fully_closed then (
-        (* We were in [closing/no-users] and are now in [closing/closed].
-           We own the FD (and our original callback will never be called). *)
-        close_fd fd
-      ) else (
-        (* The [next] callback remained installed and there is nothing left for us to do:
-           - If [t.ops] was non-zero, another thread will eventually return it to zero and call our callback.
-           - If the CAS failed, then another thread is invoking our callback. *)
-      );
-      true
-    ) else (
-      (* Another domain became the closer first. *)
-      false
-    )
+    finish_close t prev (fun () -> Fun.protect fn ~finally:(fun () -> close_fd fd))
 
 let remove t =
   Atomic.incr t.ops;

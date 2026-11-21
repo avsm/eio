@@ -89,5 +89,6 @@ let () =
     "timeout", Timeout.tests env;
     "random", Random.tests env;
     "dla", Dla.tests;
+    "fd", Test_fd.tests;
     "await", Await_fd.tests;
   ]

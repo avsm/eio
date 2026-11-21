@@ -45,6 +45,7 @@ let pipe sw =
   let w = (w : sink_ty r :> [< sink_ty] r) in
   r, w
 
+module Windows_fd = Fd.Windows
 module Rcfd = Rcfd
 module Fork_action = Fork_action
 module Thread_pool = Thread_pool

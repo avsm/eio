@@ -37,3 +37,11 @@
 (rule
  (enabled_if (<> %{os_type} "Unix"))
  (action (copy config.ml.windows config.ml)))
+
+(rule
+ (enabled_if (= %{os_type} "Win32"))
+ (action (copy fd_ownership.ml.windows fd_ownership.ml)))
+
+(rule
+ (enabled_if (<> %{os_type} "Win32"))
+ (action (copy fd_ownership.ml.unix fd_ownership.ml)))

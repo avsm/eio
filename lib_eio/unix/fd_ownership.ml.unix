@@ -1,0 +1,11 @@
+type t = bool
+
+let make ~close_unix = close_unix
+let remove _ fd = Rcfd.remove fd
+
+let close close_unix fd =
+  if close_unix then ignore (Rcfd.close fd : bool)
+  else ignore (Rcfd.remove fd : Unix.file_descr option)
+
+let id _ = invalid_arg "Windows descriptor required"
+let set_detach _ _ = invalid_arg "Windows descriptor required"

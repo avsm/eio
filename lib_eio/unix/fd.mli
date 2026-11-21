@@ -86,3 +86,12 @@ val stderr : t
 
 val pp : t Fmt.t
 (** Displays the FD number. *)
+
+module Windows : sig
+  val id : t -> int
+  (** Return the wrapper's stable identity for the IOCP registration cache. *)
+
+  val set_detach : t -> (unit -> unit) -> unit
+  (** Install the IOCP detach action while borrowing the descriptor. The backend
+      serialises installation. The action runs once after all users finish. *)
+end
