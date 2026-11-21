@@ -17,6 +17,27 @@ let cancel_read env () =
            Eio.Flow.read_exact r b;
            Alcotest.(check string) "pipe remains usable" "x" (Cstruct.to_string b)))
 
+let refused env () =
+  Switch.run @@ fun sw ->
+  let raw = Unix.socket ~cloexec:true PF_INET SOCK_STREAM 0 in
+  Fun.protect ~finally:(fun () -> Unix.close raw) @@ fun () ->
+  Unix.bind raw (ADDR_INET (Unix.inet_addr_loopback, 0));
+  let port = match Unix.getsockname raw with ADDR_INET (_, p) -> p | _ -> assert false in
+  match Eio.Time.with_timeout_exn env#clock 10.0 (fun () ->
+      Eio.Net.connect ~sw env#net (`Tcp (Eio.Net.Ipaddr.V4.loopback, port))) with
+  | _ -> Alcotest.fail "connected to non-listener"
+  | exception Eio.Io (Eio.Net.E (Connection_failure (Refused _)), _) -> ()
+
+let shutdown () =
+  Switch.run @@ fun sw ->
+  let a, _b = Eio_unix.Net.socketpair_stream ~sw () in
+  Fiber.both
+    (fun () ->
+       match Eio.Flow.single_read a (Cstruct.create 1) with
+       | _ -> Alcotest.fail "expected EOF"
+       | exception End_of_file -> ())
+    (fun () -> Fiber.yield (); Eio.Flow.shutdown a `Receive)
+
 let positioned env () =
   let path = Eio.Path.(env#cwd / "iocp-positioned") in
   Eio.Path.save path "0123456789" ~create:(`Exclusive 0o600);
@@ -79,6 +100,45 @@ let cross_domain_pipe env () =
            Eio.Flow.read_exact r buf;
            Alcotest.(check string) "domain pipe" "cross-domain" (Cstruct.to_string buf)))
 
+let tcp_after_domain_exit env () =
+  Switch.run @@ fun sw ->
+  let listener = Eio.Net.listen ~sw ~backlog:1 env#net (`Tcp (Eio.Net.Ipaddr.V4.loopback, 0)) in
+  Eio.Time.with_timeout_exn env#clock 5.0 (fun () ->
+      let client, server = Fiber.pair
+          (fun () -> Eio.Net.connect ~sw env#net (Eio.Net.listening_addr listener))
+          (fun () -> fst (Eio.Net.accept ~sw listener))
+      in
+      Eio.Domain_manager.run env#domain_mgr (fun () -> Eio.Flow.copy_string "a" server);
+      Eio.Flow.copy_string "b" server;
+      let buf = Cstruct.create 2 in
+      Eio.Flow.read_exact client buf;
+      Alcotest.(check string) "after first writer exited" "ab" (Cstruct.to_string buf);
+      Fiber.both
+        (fun () -> Eio.Flow.read_exact server buf)
+        (fun () -> Eio.Flow.copy_string "cd" client);
+      Alcotest.(check string) "queued read after owner exited" "cd" (Cstruct.to_string buf))
+
+let shared_socket env () =
+  Switch.run @@ fun sw ->
+  let a, b = Eio_unix.Net.socketpair_stream ~sw () in
+  let raw = Eio_unix.Resource.fd a in
+  let alias = Eio_unix.Fd.use_exn "dup" raw (Unix.dup ~cloexec:true) in
+  let other = Eio_unix.Net.import_socket_stream ~sw ~close_unix:true alias in
+  let read flow =
+    match Eio.Flow.single_read flow (Cstruct.create 1) with
+    | _ -> Alcotest.fail "expected EOF"
+    | exception End_of_file -> ()
+  in
+  Eio.Time.with_timeout_exn env#clock 5.0 (fun () ->
+      (* Establish the association on this scheduler before using the alias. *)
+      Eio.Flow.copy_string "x" a;
+      Eio.Flow.read_exact b (Cstruct.create 1);
+      let waiting, ready = Promise.create () in
+      Fiber.both
+        (fun () -> Eio.Domain_manager.run env#domain_mgr (fun () ->
+             Fiber.both (fun () -> read other) (fun () -> Promise.resolve ready ())))
+        (fun () -> Promise.await waiting; Eio.Flow.shutdown a `Receive))
+
 let first_completion_in_worker env () =
   Eio.Domain_manager.run env#domain_mgr (fun () ->
       Switch.run @@ fun sw ->
@@ -86,6 +146,42 @@ let first_completion_in_worker env () =
       Fiber.both
         (fun () -> Eio.Flow.copy_string "x" w)
         (fun () -> Eio.Flow.read_exact r (Cstruct.create 1)))
+
+let registration_release env () =
+  let raw_r, raw_w = Unix.socketpair ~cloexec:true PF_UNIX SOCK_STREAM 0 in
+  Fun.protect ~finally:(fun () -> Unix.close raw_r; Unix.close raw_w) @@ fun () ->
+  for _ = 1 to 3 do
+    Switch.run @@ fun sw ->
+    let r = Eio_unix.Net.import_socket_stream ~sw ~close_unix:false raw_r in
+    let w = Eio_unix.Net.import_socket_stream ~sw ~close_unix:false raw_w in
+    Eio.Time.with_timeout_exn env#clock 5.0 (fun () ->
+        Fiber.both
+          (fun () -> Eio.Flow.copy_string "x" w)
+          (fun () -> Eio.Flow.read_exact r (Cstruct.create 1)));
+    let fd = Eio_unix.Resource.fd r in
+    assert (Eio_unix.Fd.remove fd <> None);
+    Eio.Flow.close w
+  done
+
+let local_shutdown env () =
+  Switch.run @@ fun sw ->
+  let l = Eio.Net.listen ~sw ~backlog:1 env#net (`Tcp (Eio.Net.Ipaddr.V4.loopback, 0)) in
+  let connect () =
+    let c = Eio.Net.connect ~sw env#net (Eio.Net.listening_addr l) in
+    ignore (Eio.Net.accept ~sw l);
+    c
+  in
+  let c = connect () in
+  Eio.Flow.shutdown c `Send;
+  (match Eio.Flow.copy_string "x" c with
+   | () -> Alcotest.fail "write after send shutdown"
+   | exception Eio.Io (Eio.Net.E (Connection_reset _), _) -> ());
+  let c = connect () in
+  Eio.Flow.shutdown c `Receive;
+  Eio.Time.with_timeout_exn env#clock 5.0 (fun () ->
+      match Eio.Flow.single_read c (Cstruct.create 1) with
+      | _ -> Alcotest.fail "read after receive shutdown"
+      | exception End_of_file -> ())
 
 let public_errors env () =
   Switch.run @@ fun sw ->
@@ -270,14 +366,26 @@ let process_pipe env () =
   Eio.Flow.close w;
   Eio.Time.with_timeout_exn env#clock 5.0 (fun () -> List.iter (fun p -> Eio.Process.await_exn p) [producer; consumer])
 
+let accept_finished_switch env () =
+  Switch.run @@ fun sw ->
+  let listener = Eio.Net.listen ~sw ~backlog:1 env#net (`Tcp (Eio.Net.Ipaddr.V4.loopback, 0)) in
+  let finished = Switch.run Fun.id in
+  match Eio.Time.with_timeout_exn env#clock 2.0 (fun () -> Eio.Net.accept ~sw:finished listener) with
+  | _ -> Alcotest.fail "accepted on a finished switch"
+  | exception Invalid_argument _ -> ()
+
 let tests () = List.map (fun (name, fn) -> name, `Quick, fn) [
     "close during low-level readiness wait", close_during_readiness;
     "backend identifier", (fun env () -> Alcotest.(check string) "backend" "windows" env#backend_id);
     "failed stdio preparation releases handles", failed_stdio;
     "direct pipe between child processes", process_pipe;
+    "accept checks the switch before waiting", accept_finished_switch;
+    "shutdown across domains and duplicated sockets", shared_socket;
+    "TCP after first writer domain exits", tcp_after_domain_exit;
     "duplicated files share the cursor", (fun _ -> shared_file_cursor);
     "first completion in worker domain", first_completion_in_worker;
     "cancel pipe write", cancel_write;
+    "TCP reads and writes after shutdown", local_shutdown;
     "positioned I/O and unsupported socket errors", public_errors;
     "resolver service and error codes", resolve;
     "switch between readiness and port waits", mixed_waits;
@@ -287,8 +395,11 @@ let tests () = List.map (fun (name, fn) -> name, `Quick, fn) [
     "single write reports its prefix", (fun _ -> write_prefix);
     "completed write racing cancellation", (fun _ -> completed_write);
     "pipe EOF", pipe_eof;
+    "registration released on close and remove", registration_release;
     "pipe across domains", cross_domain_pipe;
     "cancel pipe read", cancel_read;
+    "connection refusal", refused;
+    "receive shutdown", (fun _ -> shutdown);
     "positioned IO preserves cursor and rights", positioned;
     "process output capture", process_capture;
   ]
