@@ -53,3 +53,13 @@ CAMLprim value caml_test_set_junction(value v_path, value v_target)
   }
   CAMLreturn(Val_unit);
 }
+
+CAMLprim value caml_eio_test_handle_count(value unit)
+{
+  DWORD count;
+  if (!GetProcessHandleCount(GetCurrentProcess(), &count)) {
+    caml_win32_maperr(GetLastError());
+    uerror("GetProcessHandleCount", Nothing);
+  }
+  return Val_long(count);
+}

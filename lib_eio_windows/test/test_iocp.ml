@@ -1,5 +1,22 @@
 open Eio.Std
 
+let cancel_read env () =
+  Switch.run @@ fun sw ->
+  let r, w = Eio_unix.pipe sw in
+  for _ = 1 to 50 do
+    Fiber.first
+      (fun () -> ignore (Eio.Flow.single_read r (Cstruct.create 1)); Alcotest.fail "unexpected data")
+      (fun () -> Fiber.yield ())
+  done;
+  Gc.full_major ();
+  Eio.Time.with_timeout_exn env#clock 2.0 (fun () ->
+      Fiber.both
+        (fun () -> Eio.Flow.copy_string "x" w)
+        (fun () ->
+           let b = Cstruct.create 1 in
+           Eio.Flow.read_exact r b;
+           Alcotest.(check string) "pipe remains usable" "x" (Cstruct.to_string b)))
+
 let positioned env () =
   let path = Eio.Path.(env#cwd / "iocp-positioned") in
   Eio.Path.save path "0123456789" ~create:(`Exclusive 0o600);
@@ -27,6 +44,48 @@ let positioned env () =
       | _ -> None
   };
   Alcotest.(check string) "sequential data" "345" (Cstruct.to_string buf)
+
+let process_capture env () =
+  let got = Eio.Process.parse_out env#process_mgr Eio.Buf_read.take_all ["cmd"; "/c"; "echo hello"] in
+  Alcotest.(check string) "captured output" "hello" (String.trim got)
+
+let cancel_write env () =
+  Switch.run @@ fun sw ->
+  let _r, w = Eio_unix.pipe sw in
+  Eio.Time.with_timeout_exn env#clock 5.0 (fun () ->
+      Fiber.first
+        (fun () -> Eio.Flow.write w [Cstruct.create (1024 * 1024)]; Alcotest.fail "write should block")
+        (fun () -> Fiber.yield (); Gc.full_major ()))
+
+let pipe_eof env () =
+  Switch.run @@ fun sw ->
+  let r, w = Eio_unix.pipe sw in
+  Eio.Time.with_timeout_exn env#clock 5.0 (fun () ->
+      Fiber.both
+        (fun () ->
+           match Eio.Flow.single_read r (Cstruct.create 1) with
+           | _ -> Alcotest.fail "expected pipe EOF"
+           | exception End_of_file -> ())
+        (fun () -> Fiber.yield (); Eio.Flow.close w))
+
+let cross_domain_pipe env () =
+  Switch.run @@ fun sw ->
+  let r, w = Eio_unix.pipe sw in
+  Eio.Time.with_timeout_exn env#clock 5.0 (fun () ->
+      Fiber.both
+        (fun () -> Eio.Domain_manager.run env#domain_mgr (fun () -> Eio.Flow.copy_string "cross-domain" w))
+        (fun () ->
+           let buf = Cstruct.create 12 in
+           Eio.Flow.read_exact r buf;
+           Alcotest.(check string) "domain pipe" "cross-domain" (Cstruct.to_string buf)))
+
+let first_completion_in_worker env () =
+  Eio.Domain_manager.run env#domain_mgr (fun () ->
+      Switch.run @@ fun sw ->
+      let r, w = Eio_unix.pipe sw in
+      Fiber.both
+        (fun () -> Eio.Flow.copy_string "x" w)
+        (fun () -> Eio.Flow.read_exact r (Cstruct.create 1)))
 
 let public_errors env () =
   Switch.run @@ fun sw ->
@@ -60,6 +119,26 @@ let resolve env () =
   match Eio.Net.getaddrinfo ~service:"nosuchservice" env#net host with
   | _ -> Alcotest.fail "resolved an unknown service"
   | exception Eio.Io (Eio.Net.E (Address_lookup_failed SERVICE), _) -> ()
+
+let mixed_waits env () =
+  let r, w = Unix.socketpair ~cloexec:true PF_UNIX SOCK_STREAM 0 in
+  Fun.protect ~finally:(fun () -> Unix.close r; Unix.close w) @@ fun () ->
+  Switch.run @@ fun sw ->
+  let input, output = Eio_unix.pipe sw in
+  Eio.Time.with_timeout_exn env#clock 5.0 (fun () ->
+      Fiber.both
+        (fun () -> Eio_unix.await_readable r)
+        (fun () ->
+           Fiber.both
+             (fun () -> Eio.Flow.read_exact input (Cstruct.create 1))
+             (fun () -> Eio.Flow.copy_string "x" output);
+           ignore (Unix.single_write_substring w "!" 0 1));
+      ignore (Unix.read r (Bytes.create 1) 0 1);
+      for _ = 1 to 20 do
+        Fiber.first (fun () -> Eio_unix.await_readable r)
+          (fun () -> Eio_unix.run_in_systhread (fun () -> ()));
+        Eio_unix.run_in_systhread (fun () -> ())
+      done)
 
 let sync_read env () =
   Switch.run @@ fun sw ->
@@ -100,6 +179,17 @@ let sync_pipe_alias () =
   Alcotest.(check string) "first read" "x" (Promise.await_exn result);
   Alcotest.(check int) "only the active reader checked readiness" 1 !waits
 
+let child_stdio env () =
+  Switch.run @@ fun sw ->
+  let stdin, _writer = Eio_unix.pipe sw in
+  let run stdin =
+    Eio.Time.with_timeout_exn env#clock 5.0 (fun () ->
+        Eio.Process.parse_out ~stdin env#process_mgr Eio.Buf_read.take_all ["cmd"; "/d"; "/c"; "echo done"])
+    |> String.trim |> Alcotest.(check string) "complete child output" "done"
+  in
+  run (stdin :> Eio.Flow.source_ty r);
+  run (Eio.Flow.string_source (String.make (1024 * 1024) 'x'))
+
 let shared_file_cursor () =
   let path = Filename.temp_file "eio-iocp-cursor" ".tmp" in
   Fun.protect ~finally:(fun () -> Sys.remove path) @@ fun () ->
@@ -129,13 +219,52 @@ let close_during_readiness env () =
       Eio.Flow.copy_string "x" w;
       Promise.await_exn ready)
 
+external handle_count : unit -> int = "caml_eio_test_handle_count"
+
+let failed_stdio env () =
+  Switch.run @@ fun sw ->
+  let _, stdout = Eio_unix.pipe sw in
+  Eio.Flow.close stdout;
+  let attempt () =
+    match Eio.Process.spawn ~sw ~stdin:(Eio.Flow.string_source "x") ~stdout env#process_mgr ["cmd"] with
+    | _ -> Alcotest.fail "spawn accepted a closed output"
+    | exception Invalid_argument _ -> ()
+  in
+  attempt ();
+  let before = handle_count () in
+  for _ = 1 to 8 do attempt () done;
+  Alcotest.(check bool) "temporary pipe handles released" true (handle_count () <= before)
+
+let process_pipe env () =
+  Switch.run @@ fun sw ->
+  let r, w = Eio.Process.pipe ~sw env#process_mgr in
+  let fd f = Option.get (Eio_unix.Resource.fd_opt f) in
+  let spawn n f executable args =
+    Eio_unix.Process.spawn_unix ~sw env#process_mgr ~fds:[n, fd f, `Blocking] ~executable (executable :: args)
+  in
+  let consumer = spawn 0 r "findstr.exe" ["/x"; "hello"] in
+  let producer = spawn 1 w "cmd.exe" ["/d"; "/c"; "echo hello"] in
+  Eio.Flow.close r;
+  Eio.Flow.close w;
+  Eio.Time.with_timeout_exn env#clock 5.0 (fun () -> List.iter (fun p -> Eio.Process.await_exn p) [producer; consumer])
+
 let tests () = List.map (fun (name, fn) -> name, `Quick, fn) [
     "close during low-level readiness wait", close_during_readiness;
     "backend identifier", (fun env () -> Alcotest.(check string) "backend" "windows" env#backend_id);
+    "failed stdio preparation releases handles", failed_stdio;
+    "direct pipe between child processes", process_pipe;
     "duplicated files share the cursor", (fun _ -> shared_file_cursor);
+    "first completion in worker domain", first_completion_in_worker;
+    "cancel pipe write", cancel_write;
     "positioned I/O and unsupported socket errors", public_errors;
     "resolver service and error codes", resolve;
+    "switch between readiness and port waits", mixed_waits;
     "synchronous pipe read cancellation", sync_read;
     "duplicated synchronous pipe readers", (fun _ -> sync_pipe_alias);
+    "child exit releases stdin and drains stdout", child_stdio;
+    "pipe EOF", pipe_eof;
+    "pipe across domains", cross_domain_pipe;
+    "cancel pipe read", cancel_read;
     "positioned IO preserves cursor and rights", positioned;
+    "process output capture", process_capture;
   ]
