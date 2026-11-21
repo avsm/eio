@@ -1,0 +1,4 @@
+(test
+ (name contracts)
+ (package eio_main)
+ (libraries eio_main))

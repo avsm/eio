@@ -83,6 +83,7 @@ end
 let () =
   Eio_windows.run @@ fun env ->
   Alcotest.run "eio_windows" [
+    "iocp", Test_iocp.tests env;
     "net", Test_net.tests env;
     "fs", Test_fs.tests env;
     "process", Test_process.tests env;
