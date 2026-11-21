@@ -399,6 +399,21 @@ let shared_file_cursor () =
   let x, y = Fiber.pair (fun () -> byte a) (fun () -> byte b) in
   Alcotest.(check (list string)) "one byte per alias" ["x"; "y"] (List.sort String.compare [x; y])
 
+let sandbox_open_worker env () =
+  let path = Eio.Path.(env#cwd / "iocp-open-worker") in
+  Eio.Path.save ~create:(`Exclusive 0o600) path "file";
+  Fun.protect ~finally:(fun () -> Eio.Path.unlink path) @@ fun () ->
+  let jobs = ref 0 in
+  Effect.Deep.try_with (fun () -> Eio.Path.with_open_in path ignore) () {
+    effc = fun (type a) (eff : a Effect.t) -> match eff with
+      | Eio_unix.Private.Thread_pool.Run_in_systhread _ ->
+        Some (fun (k : (a, unit) Effect.Deep.continuation) ->
+            incr jobs;
+            Effect.Deep.continue k (Effect.perform eff))
+      | _ -> None
+  };
+  Alcotest.(check int) "worker jobs per sandboxed open" 1 !jobs
+
 let close_during_readiness env () =
   Switch.run @@ fun sw ->
   let r, w = Eio_unix.Net.socketpair_stream ~sw () in
@@ -456,6 +471,7 @@ let tests () = List.map (fun (name, fn) -> name, `Quick, fn) [
     "shutdown across domains and duplicated sockets", shared_socket;
     "TCP after first writer domain exits", tcp_after_domain_exit;
     "duplicated files share the cursor", (fun _ -> shared_file_cursor);
+    "sandboxed open uses one worker job", sandbox_open_worker;
     "first completion in worker domain", first_completion_in_worker;
     "cancel pipe write", cancel_write;
     "TCP reads and writes after shutdown", local_shutdown;

@@ -107,11 +107,12 @@ let getrandom { Cstruct.buffer; off; len } =
 
 external eio_reparse_point : Unix.file_descr -> (string * bool * int) option = "caml_eio_windows_reparse_point"
 
-let reparse_target fd =
-  Fd.use_exn "read_link" fd @@ fun fd ->
+let reparse_target_raw fd =
   Option.map (fun (target, relative, _) ->
       if relative then Eio_utils.Nt_path.Relative target else Absolute target
     ) (eio_reparse_point fd)
+
+let reparse_target fd = Fd.use_exn "read_link" fd reparse_target_raw
 
 let fstat fd =
   Fd.use_exn "fstat" fd @@ fun fd ->
@@ -248,26 +249,84 @@ external eio_openat :
   Flags.Open.t -> Flags.Disposition.t -> Flags.Create.t -> Unix.file_descr
   = "caml_eio_windows_openat_bytes" "caml_eio_windows_openat"
 
-let openat ?dirfd ?(beneath=false) ?(follow=Follow) ~sw path flags dis create =
-  with_dirfd "openat" dirfd @@ fun dirfd ->
-  Switch.check sw;
-  let path = nt_path dirfd path in
+let openat_raw dirfd ~beneath ~follow path flags dis create =
   let flags = Flags.Open.(flags + cloexec) in
   (* FILE_CREATE must test the leaf itself, even if it is a dangling link. *)
   let open_link = follow = Open_link || dis = Flags.Disposition.create in
-  in_worker_thread ~label:"openat" (fun () ->
-      match Eio_utils.Nt_path.split path with
-      | Some (parent, leaf) when follow = Nofollow && not beneath ->
-        (* Refuse a leaf link before any side effect, including truncation. *)
-        let parent =
-          eio_openat dirfd ~beneath:false ~open_link:false parent
-            Flags.Open.synchronise Flags.Disposition.open_ Flags.Create.directory
-        in
-        Fun.protect ~finally:(fun () -> Unix.close parent) @@ fun () ->
-        eio_openat (Some parent) ~beneath:true ~open_link leaf flags dis create
-      | _ -> eio_openat dirfd ~beneath ~open_link path flags dis create
-    )
+  match Eio_utils.Nt_path.split path with
+  | Some (parent, leaf) when follow = Nofollow && not beneath ->
+    let parent = eio_openat dirfd ~beneath:false ~open_link:false parent
+        Flags.Open.synchronise Flags.Disposition.open_ Flags.Create.directory in
+    Fun.protect ~finally:(fun () -> Unix.close parent) @@ fun () ->
+    eio_openat (Some parent) ~beneath:true ~open_link leaf flags dis create
+  | _ -> eio_openat dirfd ~beneath ~open_link path flags dis create
+
+let open_on_worker ~sw fn =
+  Switch.check sw;
+  in_worker_thread ~label:"openat" fn
   |> Fd.of_unix ~sw ~blocking:true ~close_unix:true
+
+let openat ?dirfd ?(beneath=false) ?(follow=Follow) ~sw path flags dis create =
+  with_dirfd "openat" dirfd @@ fun dirfd ->
+  let path = nt_path dirfd path in
+  open_on_worker ~sw (fun () -> openat_raw dirfd ~beneath ~follow path flags dis create)
+
+(* A cwd capability tracks chdir, but must never follow a replacement junction. *)
+let open_root_raw root =
+  openat_raw None ~beneath:true ~follow:Follow (nt_path None root)
+    Flags.Open.(generic_read + synchronise) Flags.Disposition.open_ Flags.Create.directory
+
+let open_root ~sw root = open_on_worker ~sw (fun () -> open_root_raw root)
+
+let open_beneath ?dirfd ~root ~sw ~follow path flags disp create =
+  let module Nt_path = Eio_utils.Nt_path in
+  let path = Err.relative ~root path in
+  with_dirfd "openat" dirfd @@ fun dirfd ->
+  open_on_worker ~sw @@ fun () ->
+  let resolve root_fd =
+    let open_at = openat_raw (Some root_fd) ~beneath:true in
+    let root_path = lazy (eio_realpath_fd root_fd) in
+    let link_target path =
+      let fd = open_at ~follow:Open_link path Flags.Open.synchronise Flags.Disposition.open_ Flags.Create.empty in
+      Fun.protect ~finally:(fun () -> Unix.close fd) (fun () -> reparse_target_raw fd)
+    in
+    (* Walk up to the first prefix that opens without traversing a link. *)
+    let find_link path =
+      let rec go p rest =
+        match link_target p with
+        | Some target -> Some (p, target, rest)
+        | None -> None
+        | exception Unix.Unix_error _ -> up p rest
+      and up p rest =
+        match Nt_path.split p with
+        | Some (parent, leaf) -> go parent (if rest = "" then leaf else Nt_path.join leaf rest)
+        | None -> None
+      in
+      if follow = Open_link then up path "" else go path ""
+    in
+    let rec go follows path =
+      match open_at ~follow path flags disp create with
+      | fd -> fd
+      | exception (Unix.Unix_error _ as ex) ->
+        match find_link path with
+        | Some (link, _, _) when link = path && disp = Flags.Disposition.create ->
+          raise (Unix.Unix_error (EEXIST, "openat", path))
+        | Some (link, _, _) when link = path && follow = Nofollow ->
+          raise (Unix.Unix_error (ELOOP, "openat", path))
+        | Some (link, target, rest) when follows > 0 ->
+          let target = Err.beneath ~root link (
+              Nt_path.resolve_link ~root:(Lazy.force root_path) ~parent:(Nt_path.dirname link) target
+            ) in
+          go (follows - 1) (if rest = "" then target else Nt_path.join target rest)
+        | _ -> raise ex
+    in
+    go 40 path
+  in
+  match dirfd with
+  | Some fd -> resolve fd
+  | None ->
+    let fd = open_root_raw root in
+    Fun.protect ~finally:(fun () -> Unix.close fd) (fun () -> resolve fd)
 
 let read_link ?dirfd path =
   Switch.run @@ fun sw ->
