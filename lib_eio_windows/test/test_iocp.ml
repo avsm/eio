@@ -202,6 +202,17 @@ let public_errors env () =
   | () -> Alcotest.fail "wrote to a read-only descriptor"
   | exception Eio.Io (_, _) -> ()
 
+let abstract_socket env () =
+  Switch.run @@ fun sw ->
+  let addr = `Unix "\000eio-test" in
+  let rejected f =
+    match f () with
+    | _ -> Alcotest.fail "accepted an abstract Unix address"
+    | exception Eio.Io (Eio.Exn.Not_available _, _) -> ()
+  in
+  rejected (fun () -> Eio.Net.listen ~sw ~reuse_addr:true ~backlog:1 env#net addr);
+  rejected (fun () -> Eio.Net.connect ~sw env#net addr)
+
 let resolve env () =
   let host = "127.0.0.1" in
   let lo = Eio.Net.Ipaddr.V4.loopback in
@@ -387,6 +398,7 @@ let tests () = List.map (fun (name, fn) -> name, `Quick, fn) [
     "cancel pipe write", cancel_write;
     "TCP reads and writes after shutdown", local_shutdown;
     "positioned I/O and unsupported socket errors", public_errors;
+    "abstract Unix addresses", abstract_socket;
     "resolver service and error codes", resolve;
     "switch between readiness and port waits", mixed_waits;
     "synchronous pipe read cancellation", sync_read;

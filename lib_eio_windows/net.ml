@@ -2,6 +2,11 @@ open Eio.Std
 
 module Fd = Eio_unix.Fd
 
+let sockaddr_to_unix = function
+  | `Unix path when String.starts_with ~prefix:"\x00" path ->
+    raise (Err.v EOPNOTSUPP "abstract Unix socket" path)
+  | addr -> Eio_unix.Net.sockaddr_to_unix addr
+
 let socket_domain_of = function
   | `Unix _ -> Unix.PF_UNIX
   | `UdpV4 -> Unix.PF_INET
@@ -101,9 +106,8 @@ let getaddrinfo ~service node =
   Err.run (Eio_unix.Private.getaddrinfo ~service) node
 
 let remove_on_release ~sw listen_addr =
-  (* For Unix domain sockets, remove the path when done (except for abstract sockets). *)
   match listen_addr with
-  | `Unix path when String.length path > 0 && path.[0] <> Char.chr 0 ->
+  | `Unix path when path <> "" ->
     Switch.on_release_cancellable sw (fun () ->
         try Unix.unlink path
         with Unix.Unix_error _ ->
@@ -116,7 +120,8 @@ let remove_on_release ~sw listen_addr =
 let socket ~sw addr ty = Err.run (Low_level.socket ~sw (socket_domain_of addr) ty) 0
 
 let listen ~reuse_addr ~reuse_port ~backlog ~sw (listen_addr : Eio.Net.Sockaddr.stream) =
-  let socket_type, addr, is_unix_socket =
+  let addr = sockaddr_to_unix listen_addr in
+  let is_unix_socket =
     match listen_addr with
     | `Unix path         ->
       if reuse_addr then (
@@ -126,12 +131,10 @@ let listen ~reuse_addr ~reuse_port ~backlog ~sw (listen_addr : Eio.Net.Sockaddr.
         | exception Unix.Unix_error (Unix.ENOENT, _, _) -> ()
         | exception Unix.Unix_error (code, name, arg) -> raise @@ Err.v code name arg
       );
-      Unix.SOCK_STREAM, Unix.ADDR_UNIX path, true
-    | `Tcp (host, port)  ->
-      let host = Eio_unix.Net.Ipaddr.to_unix host in
-      Unix.SOCK_STREAM, Unix.ADDR_INET (host, port), false
+      true
+    | `Tcp _ -> false
   in
-  let sock = socket ~sw listen_addr socket_type in
+  let sock = socket ~sw listen_addr Unix.SOCK_STREAM in
   let hook =
     Fd.use_exn "listen" sock (fun fd ->
         try
@@ -152,21 +155,15 @@ let listen ~reuse_addr ~reuse_port ~backlog ~sw (listen_addr : Eio.Net.Sockaddr.
   (listening_socket ~hook sock :> _ Eio.Net.listening_socket_ty r)
 
 let connect ~bind_to ~options ~sw connect_addr =
-  let socket_type, addr =
-    match connect_addr with
-    | `Unix path         -> Unix.SOCK_STREAM, Unix.ADDR_UNIX path
-    | `Tcp (host, port)  ->
-      let host = Eio_unix.Net.Ipaddr.to_unix host in
-      Unix.SOCK_STREAM, Unix.ADDR_INET (host, port)
-  in
-  let sock = socket ~sw connect_addr socket_type in
+  let addr = sockaddr_to_unix connect_addr in
+  let sock = socket ~sw connect_addr Unix.SOCK_STREAM in
   let rec set_options : Eio.Net.Sockopt.settings -> unit = function
     | [] -> ()
     | (o, v) :: tl -> Eio_unix.Private.setsockopt sock o v; set_options tl
   in
   Err.run (fun () ->
       set_options options;
-      Option.iter (fun a -> Fd.use_exn "bind" sock (fun fd -> Unix.bind fd (Eio_unix.Net.sockaddr_to_unix a))) bind_to;
+      Option.iter (fun a -> Fd.use_exn "bind" sock (fun fd -> Unix.bind fd (sockaddr_to_unix a))) bind_to;
       Low_level.connect sock addr
     ) ();
   (Flow.stream sock :> _ Eio_unix.Net.stream_socket)
@@ -176,7 +173,7 @@ let create_datagram_socket ~reuse_addr ~reuse_port ~sw saddr =
   let hook =
     match saddr with
     | `Udp _ | `Unix _ as saddr ->
-      let addr = Eio_unix.Net.sockaddr_to_unix saddr in
+      let addr = sockaddr_to_unix saddr in
       Fd.use_exn "datagram_socket" sock (fun fd ->
           try
             if reuse_addr then
