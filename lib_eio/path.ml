@@ -139,10 +139,10 @@ let save ?follow ?append ~create path data =
   Flow.copy_string data flow
 
 let copy ?follow ~perm src dst =
-  Switch.run ~name:"Path.copy" @@ fun sw ->
-  let input = open_in ~sw ?follow src in
-  let (Resource.T (out, ops) as output) = open_out ~sw ~create:(`Exclusive perm) dst in
   try
+    Switch.run ~name:"Path.copy" @@ fun sw ->
+    let input = open_in ~sw ?follow src in
+    let (Resource.T (out, ops) as output) = open_out ~sw ~create:(`Exclusive perm) dst in
     match Resource.get_opt ops File.Pi.Copy_file with
     | Some copy -> copy out ~src:input
     | None -> Flow.copy input output

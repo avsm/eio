@@ -178,6 +178,21 @@ An existing destination is preserved, including when both names refer to the sam
 - : unit = ()
 ```
 
+Refusing a source symlink reports both paths and leaves the destination absent.
+
+```ocaml
+# run ~clear:["copy-link"; "copy-dst"] @@ fun env ->
+  let src = env#cwd / "copy-link" and dst = env#cwd / "copy-dst" in
+  Path.symlink src ~link_to:"test-file";
+  (match Path.copy ~follow:false ~perm:0o600 src dst with
+   | exception (Eio.Io _ as ex) -> traceln "@[<h>%a@]" Eio.Exn.pp ex
+   | () -> failwith "followed source symlink");
+  assert (Path.kind ~follow:false dst = `Not_found);
+  Path.unlink src;;
++Eio.Io Fs Symlink, opening <cwd:copy-link>, copying <cwd:copy-link> to <cwd:copy-dst>
+- : unit = ()
+```
+
 # Sandboxing
 
 Trying to use cwd to access a file outside of that subtree fails:

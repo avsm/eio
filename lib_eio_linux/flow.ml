@@ -168,28 +168,41 @@ let copy_ranges ~size_hint src dst =
   for _ = 2 to workers do Fiber.fork ~sw worker done;
   worker ()
 
-let copy_file dst ~src =
-  match Eio_unix.Resource.fd_opt src with
-  | None -> Impl.copy dst ~src
-  | Some fd when not (Eio_unix.Fd.is_seekable fd) -> fast_copy fd dst
-  | Some fd ->
-    match Low_level.fstat fd with
-    | { kind = `Regular_file; size; _ } when Optint.Int63.(compare size zero) > 0 ->
-      copy_ranges ~size_hint:size fd dst
-    | { kind = `Block_device; _ } ->
-      (* Linux reports st_size = 0 for block devices. Read until EOF. *)
-      copy_ranges ~size_hint:Optint.Int63.max_int fd dst
-    | _ -> fast_copy fd dst
+(* Direct FD reads must return the same bytes as the source's read operations. *)
+type 'a Eio.Flow.read_method += Copy_to_file of ('a -> Eio_unix.Fd.t -> unit)
 
-let file_handler =
+module File = struct
+  include Impl
+
+  let copy_to_file src dst =
+    if Eio_unix.Fd.is_seekable src then (
+      match Low_level.fstat src with
+      | { kind = `Regular_file; size; _ } when Optint.Int63.(compare size zero) > 0 ->
+        copy_ranges ~size_hint:size src dst
+      | { kind = `Block_device; _ } ->
+        (* Linux reports st_size = 0 for block devices. Read until EOF. *)
+        copy_ranges ~size_hint:Optint.Int63.max_int src dst
+      | _ -> fast_copy src dst
+    ) else fast_copy src dst
+
+  let read_methods = [Copy_to_file copy_to_file]
+end
+
+let copy_file dst ~src:(Eio.Resource.T (t, ops) as src) =
+  let module Source = (val Eio.Resource.get ops Eio.Flow.Pi.Source) in
+  match Source.read_methods with
+  | Copy_to_file copy :: _ -> copy t dst
+  | _ -> Eio.Flow.Pi.simple_copy ~single_write:Impl.single_write dst ~src
+
+let file_handler : (Eio_unix.Fd.t, [`Unix_fd | `Copy_file | Eio.File.rw_ty]) Eio.Resource.handler =
   Eio.Resource.handler (
-    Eio.Resource.H (Eio.File.Pi.Copy_file, copy_file) ::
-    Eio.Resource.bindings (Eio_unix.Pi.file_handler (module Impl))
+    Eio.Resource.bindings (Eio_unix.Pi.file_handler (module File)) @
+    [H (Eio.File.Pi.Copy_file, copy_file)]
   )
 
 let of_fd fd =
   let r = Eio.Resource.T (fd, file_handler) in
-  (r : [`Unix_fd | Eio.File.rw_ty] r :>
+  (r : [`Unix_fd | `Copy_file | Eio.File.rw_ty] r :>
      [< `Unix_fd | Eio.File.rw_ty] r)
 
 let stream_handler = Eio_unix.Pi.stream_handler (module Impl)

@@ -82,6 +82,39 @@ let test_copy_proc_file () =
   Eio.Path.copy ~perm:0o600 src dst;
   Alcotest.(check string) "procfs contents" (Eio.Path.load src) (Eio.Path.load dst)
 
+let test_copy_wrapped_file () =
+  run @@ fun env ->
+  let open Eio in
+  let ( / ) = Path.( / ) in
+  let dir = env#fs / Filename.temp_dir "eio-copy-" "" in
+  Fun.protect ~finally:(fun () -> Path.rmtree dir) @@ fun () ->
+  let src = dir / "src" and dst = dir / "dst" in
+  Path.save ~create:(`Exclusive 0o600) src "backing data";
+  let Resource.T (base, ops), path = src in
+  let module Dir = (val Resource.get ops Fs.Pi.Dir) in
+  let module View = struct
+    include Dir
+    let open_in dir ~sw ~follow path =
+      let Resource.T (t, ops) = Dir.open_in dir ~sw ~follow path in
+      let module Read = (val Resource.get ops File.Pi.Read) in
+      let module Empty = struct
+        include Read
+        let stat t = { (Read.stat t) with size = Optint.Int63.zero }
+        let read_methods = []
+        let single_read _ _ = raise End_of_file
+        let pread _ ~file_offset:_ _ = raise End_of_file
+      end in
+      let fd = Option.get (Resource.get_opt ops Eio_unix.Resource.T) in
+      let ops = Resource.handler (
+          Resource.H (Eio_unix.Resource.T, fd) ::
+          Resource.bindings (File.Pi.ro (module Empty))
+        ) in
+      Resource.T (t, ops)
+  end in
+  let src = Resource.T (base, Resource.handler [H (Fs.Pi.Dir, (module View))]), path in
+  Path.copy ~perm:0o600 src dst;
+  Alcotest.(check string) "source view" "" (Path.load dst)
+
 (* Write a string via 2 pipes. The copy from the 1st to 2nd pipe will be optimised and so tests a different code-path. *)
 let test_direct_copy () =
   run ~queue_depth:4 @@ fun _stdenv ->
@@ -327,6 +360,7 @@ let () =
   run "eio_linux" [
     "io", [
       test_case "copy"                 `Quick test_copy;
+      test_case "copy_wrapped_file"    `Quick test_copy_wrapped_file;
       test_case "copy_proc_file"       `Quick test_copy_proc_file;
       test_case "direct_copy"          `Quick test_direct_copy;
       test_case "poll_add"             `Quick test_poll_add;

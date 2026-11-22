@@ -136,7 +136,7 @@ module Pi : sig
   type (_, _, _) Resource.pi +=
     | Read : ('t, (module READ with type t = 't), [> ro_ty]) Resource.pi
     | Write : ('t, (module WRITE with type t = 't), [> rw_ty]) Resource.pi
-    | Copy_file : ('t, 't -> src:ro_ty r -> unit, [> rw_ty]) Resource.pi
+    | Copy_file : ('t, 't -> src:ro_ty r -> unit, [> `Copy_file]) Resource.pi
     (** Optional implementation of {!Path.copy} on the freshly created destination.
         Both files are positioned at the start. Writes may complete out of order. *)
 
