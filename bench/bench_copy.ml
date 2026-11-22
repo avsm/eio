@@ -42,3 +42,32 @@ let run _env =
         let r = Eio.Buf_read.of_flow sock ~initial_size:(64 * 1024) ~max_size:(64 * 1024) |> Eio.Buf_read.as_flow in
         Eio.Flow.copy r sock);
   ]
+
+let run_file env =
+  let open Eio.Path in
+  let fs = Eio.Stdenv.fs env in
+  Bench_stat.with_tmp_dir ~fs "eio-bench-" "-copy" @@ fun dir ->
+  let src = dir / "src" and dst = dir / "dst" in
+  let perm = 0o600 in
+  let file_chunks = 1024 in
+  let chunk = Cstruct.of_string (String.init chunk_size (fun _ -> Char.chr (Random.int 256))) in
+  with_open_out ~create:(`Exclusive perm) src (fun f ->
+      for _ = 1 to file_chunks do Eio.Flow.write f [chunk] done
+    );
+  let measure name fn =
+    let now () = Eio.Time.Mono.now env#mono_clock in
+    let start = now () in
+    fn ();
+    let elapsed = Mtime.Span.to_float_ns (Mtime.span start (now ())) in
+    unlink dst;
+    let rate = float (file_chunks * chunk_size) *. 1e9 /. elapsed in
+    traceln "%s: %.2f MiB/s" name (rate /. 1048576.);
+    Metric.create name (`Float rate) "bytes/s" "File copy throughput"
+  in
+  let stream = measure "Flow.copy" (fun () ->
+      with_open_in src @@ fun input ->
+      with_open_out ~create:(`Exclusive perm) dst @@ fun output ->
+      Eio.Flow.copy input output
+    ) in
+  let batched = measure "Path.copy" (fun () -> copy ~perm src dst) in
+  [stream; batched]

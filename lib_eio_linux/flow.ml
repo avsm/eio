@@ -135,7 +135,57 @@ module Impl = struct
   let getsockopt = Low_level.getsockopt
 end
 
-let file_handler = Eio_unix.Pi.file_handler (module Impl)
+(* Each worker owns one buffer and submits its next operation as soon as its
+   previous one completes. The scheduler can submit several workers' SQEs together. *)
+let copy_ranges ~size_hint src dst =
+  let module I = Optint.Int63 in
+  (* Limit scratch space to 512 KiB per copy, even on very deep rings. *)
+  let max_workers = min 4 (Uring.queue_depth (Sched.get ()).uring) in
+  let chunk = min (I.of_int (128 * 1024)) size_hint in
+  let last_chunk = I.div (I.pred size_hint) chunk in
+  let workers = 1 + I.to_int (min (I.of_int (max_workers - 1)) last_chunk) in
+  let next = ref I.zero in
+  let eof = ref false in
+  let worker () =
+    let buf = Cstruct.create (I.to_int chunk) in
+    let rec copy_chunk file_offset buf =
+      match Low_level.readv ~file_offset src [buf] with
+      | exception End_of_file -> eof := true
+      | n ->
+        Low_level.writev ~file_offset dst [Cstruct.sub buf 0 n];
+        if n < Cstruct.length buf then
+          copy_chunk (I.add file_offset (I.of_int n)) (Cstruct.shift buf n)
+    in
+    (* Claim offsets before yielding. Even after another worker observes EOF,
+       finish every range already claimed, including any short reads. *)
+    while not !eof do
+      let offset = !next in
+      next := I.add offset chunk;
+      copy_chunk offset buf
+    done
+  in
+  Switch.run @@ fun sw ->
+  for _ = 2 to workers do Fiber.fork ~sw worker done;
+  worker ()
+
+let copy_file dst ~src =
+  match Eio_unix.Resource.fd_opt src with
+  | None -> Impl.copy dst ~src
+  | Some fd when not (Eio_unix.Fd.is_seekable fd) -> fast_copy fd dst
+  | Some fd ->
+    match Low_level.fstat fd with
+    | { kind = `Regular_file; size; _ } when Optint.Int63.(compare size zero) > 0 ->
+      copy_ranges ~size_hint:size fd dst
+    | { kind = `Block_device; _ } ->
+      (* Linux reports st_size = 0 for block devices. Read until EOF. *)
+      copy_ranges ~size_hint:Optint.Int63.max_int fd dst
+    | _ -> fast_copy fd dst
+
+let file_handler =
+  Eio.Resource.handler (
+    Eio.Resource.H (Eio.File.Pi.Copy_file, copy_file) ::
+    Eio.Resource.bindings (Eio_unix.Pi.file_handler (module Impl))
+  )
 
 let of_fd fd =
   let r = Eio.Resource.T (fd, file_handler) in

@@ -92,6 +92,7 @@ module Pi = struct
   type (_, _, _) Resource.pi +=
     | Read : ('t, (module READ with type t = 't), [> ro_ty]) Resource.pi
     | Write : ('t, (module WRITE with type t = 't), [> rw_ty]) Resource.pi
+    | Copy_file : ('t, 't -> src:ro_ty r -> unit, [> rw_ty]) Resource.pi
 
   let ro (type t) (module X : READ with type t = t) =
     Resource.handler [

@@ -13,6 +13,7 @@ let benchmarks = [
   "Eio_unix.Fd", Bench_fd.run;
   "File.stat", Bench_fstat.run;
   "Path.stat", Bench_stat.run;
+  "Path.copy", Bench_copy.run_file;
   "Flow.copy", Bench_copy.run;
   "Eio_unix.run_in_systhread", Bench_systhread.run;
 ]

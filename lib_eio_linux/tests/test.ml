@@ -70,6 +70,18 @@ let test_copy () =
   Alcotest.(check string) "Copy correct" (msg ^ msg) (Buffer.contents buffer);
   Eio.Flow.close from_pipe
 
+(* procfs files can report a size of zero and still return data. *)
+let test_copy_proc_file () =
+  if not (Sys.file_exists "/proc/version") then Alcotest.skip ();
+  run @@ fun env ->
+  let ( / ) = Eio.Path.( / ) in
+  let src = env#fs / "/proc/version" in
+  let dir = env#fs / Filename.temp_dir "eio-copy-" "" in
+  Fun.protect ~finally:(fun () -> Eio.Path.rmtree dir) @@ fun () ->
+  let dst = dir / "version" in
+  Eio.Path.copy ~perm:0o600 src dst;
+  Alcotest.(check string) "procfs contents" (Eio.Path.load src) (Eio.Path.load dst)
+
 (* Write a string via 2 pipes. The copy from the 1st to 2nd pipe will be optimised and so tests a different code-path. *)
 let test_direct_copy () =
   run ~queue_depth:4 @@ fun _stdenv ->
@@ -315,6 +327,7 @@ let () =
   run "eio_linux" [
     "io", [
       test_case "copy"                 `Quick test_copy;
+      test_case "copy_proc_file"       `Quick test_copy_proc_file;
       test_case "direct_copy"          `Quick test_direct_copy;
       test_case "poll_add"             `Quick test_poll_add;
       test_case "poll_add_busy"        `Quick test_poll_add_busy;

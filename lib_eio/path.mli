@@ -133,6 +133,14 @@ val save :
 
     This is a convenience wrapper around {!with_open_out}. *)
 
+val copy : ?follow:bool -> perm:File.Unix_perm.t -> _ t -> _ t -> unit
+(** [copy ~perm src dst] copies the contents of [src] to a new file [dst] with
+    creation permissions [perm]. If [dst] already exists, it raises {!Fs.Already_exists}.
+    [follow] applies to [src] as in {!open_in}.
+
+    Writes may complete out of order. If copying fails or is cancelled, [dst]
+    may contain a partial copy. *)
+
 val open_out :
   sw:Switch.t ->
   ?follow:bool ->

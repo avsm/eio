@@ -138,6 +138,18 @@ let save ?follow ?append ~create path data =
   with_open_out ?follow ?append ~create path @@ fun flow ->
   Flow.copy_string data flow
 
+let copy ?follow ~perm src dst =
+  Switch.run ~name:"Path.copy" @@ fun sw ->
+  let input = open_in ~sw ?follow src in
+  let (Resource.T (out, ops) as output) = open_out ~sw ~create:(`Exclusive perm) dst in
+  try
+    match Resource.get_opt ops File.Pi.Copy_file with
+    | Some copy -> copy out ~src:input
+    | None -> Flow.copy input output
+  with Exn.Io _ as ex ->
+    let bt = Printexc.get_raw_backtrace () in
+    Exn.reraise_with_context ex bt "copying %a to %a" pp src pp dst
+
 let unlink ?(missing_ok=false) t =
   let (Resource.T (dir, ops), path) = t in
   let module X = (val (Resource.get ops Fs.Pi.Dir)) in

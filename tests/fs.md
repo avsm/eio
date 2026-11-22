@@ -141,6 +141,43 @@ Perm = 644
 - : unit = ()
 ```
 
+# Copying files
+
+Copy empty files, whole blocks, and a multi-batch file with a short final block.
+Use different bytes in each block to catch misplaced writes.
+
+```ocaml
+# run ~clear:["copy-src"; "copy-dst"] @@ fun env ->
+  let src = env#cwd / "copy-src" and dst = env#cwd / "copy-dst" in
+  let rng = Random.State.make [|748|] in
+  List.iter (fun len ->
+      let data = String.init len (fun _ -> Char.chr (Random.State.int rng 256)) in
+      Path.save ~create:(`Or_truncate 0o600) src data;
+      Path.copy ~perm:0o640 src dst;
+      assert (Path.load dst = data);
+      assert ((Path.stat ~follow:true dst).perm = 0o640);
+      Path.unlink dst
+    ) [0; 1; 128 * 1024; 3 * 1024 * 1024 + 17];
+  Path.unlink src;;
+- : unit = ()
+```
+
+An existing destination is preserved, including when both names refer to the same file.
+
+```ocaml
+# run ~clear:["copy-src"; "copy-link"] @@ fun env ->
+  let src = env#cwd / "copy-src" and link = env#cwd / "copy-link" in
+  Path.save ~create:(`Exclusive 0o600) src "original";
+  Path.symlink link ~link_to:"copy-src";
+  (match Path.copy ~perm:0o600 src link with
+   | exception Eio.Io (Eio.Fs.E (Already_exists _), _) -> ()
+   | () -> failwith "overwrote destination");
+  assert (Path.load src = "original");
+  Path.unlink link;
+  Path.unlink src;;
+- : unit = ()
+```
+
 # Sandboxing
 
 Trying to use cwd to access a file outside of that subtree fails:
